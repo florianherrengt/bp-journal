@@ -30,8 +30,8 @@ export function readConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): AppConfig {
   const password = env.APP_PASSWORD
-  if (!password || password.length < 12) {
-    throw new Error("APP_PASSWORD is required and must be at least 12 characters")
+  if (!password) {
+    throw new Error("APP_PASSWORD is required")
   }
 
   const providedSessionSecret = env.SESSION_SECRET?.trim()

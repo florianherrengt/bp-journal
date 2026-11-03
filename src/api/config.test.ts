@@ -16,9 +16,14 @@ describe("runtime configuration", () => {
     expect(config.sessionSecret).toHaveLength(43)
   })
 
-  it("requires a long shared password and a safe configured session key", () => {
-    expect(() => readConfig({ APP_PASSWORD: "short" })).toThrow("APP_PASSWORD")
+  it("requires a shared password and a safe configured session key", () => {
+    expect(() => readConfig({})).toThrow("APP_PASSWORD")
+    expect(() => readConfig({ APP_PASSWORD: "" })).toThrow("APP_PASSWORD")
     expect(() => readConfig({ APP_PASSWORD: password, SESSION_SECRET: "too-short" })).toThrow("SESSION_SECRET")
+  })
+
+  it.each(["x", "short"])("accepts the non-empty password %s without a minimum length", (value) => {
+    expect(readConfig({ APP_PASSWORD: value }).password).toBe(value)
   })
 
   it("treats an empty Docker-provided session key as omitted", () => {

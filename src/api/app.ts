@@ -13,7 +13,7 @@ import { recognizeReading } from "./ocr.ts"
 import { createCsvStore } from "./store.ts"
 
 const COOKIE_NAME = "bp_session"
-const SESSION_SECONDS = 60 * 60 * 24 * 7
+const SESSION_SECONDS = 60 * 60 * 24 * 365
 const MAX_ACTIVE_UPLOADS = 20
 const MAX_RETAINED_JOBS = 50
 const LOGIN_WINDOW_MS = 15 * 60 * 1000

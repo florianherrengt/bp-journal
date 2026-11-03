@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { afterAll, afterEach, describe, expect, it } from "vitest"
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
 
 import { createApp } from "./app.ts"
 import type { AppConfig } from "./config.ts"
@@ -131,6 +131,72 @@ describe("BP Tracker API", () => {
     })
     expect(loggedOut.status).toBe(200)
     expect(loggedOut.headers.get("set-cookie")).toContain("Max-Age=0")
+  })
+
+  it("expires sessions after one year and resets expiry on a later sign-in", async () => {
+    vi.useFakeTimers()
+    try {
+      const firstSignIn = new Date("2025-01-01T12:00:00.000Z")
+      vi.setSystemTime(firstSignIn)
+      const { app } = await setup()
+
+      async function signIn() {
+        return app.request("/api/login", {
+          method: "POST",
+          headers: { Origin: origin, "Content-Type": "application/json" },
+          body: JSON.stringify({ password }),
+        })
+      }
+
+      function sessionFrom(response: Response) {
+        const serialized = response.headers.get("set-cookie")!
+        const cookie = serialized.split(";", 1)[0]!
+        const token = cookie.slice("bp_session=".length)
+        const claims = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8")) as {
+          iat: number
+          exp: number
+        }
+        return { cookie, claims, maxAge: Number(serialized.match(/Max-Age=(\d+)/)?.[1]) }
+      }
+
+      const firstLogin = await signIn()
+      expect(firstLogin.status).toBe(200)
+      const firstSession = sessionFrom(firstLogin)
+      const yearInSeconds = 365 * 24 * 60 * 60
+      expect(firstSession.claims.iat).toBe(Math.floor(firstSignIn.getTime() / 1000))
+      expect(firstSession.claims.exp - firstSession.claims.iat).toBe(yearInSeconds)
+      expect(firstSession.maxAge).toBe(yearInSeconds)
+
+      const renewalTime = new Date(firstSignIn.getTime() + 180 * 24 * 60 * 60 * 1000)
+      vi.setSystemTime(renewalTime)
+      const renewal = await signIn()
+      expect(renewal.status).toBe(200)
+      const renewedSession = sessionFrom(renewal)
+      expect(renewedSession.claims.iat).toBe(Math.floor(renewalTime.getTime() / 1000))
+      expect(renewedSession.claims.exp - renewedSession.claims.iat).toBe(yearInSeconds)
+      expect(renewedSession.maxAge).toBe(yearInSeconds)
+
+      const isAuthenticated = async (cookie: string) => {
+        const response = await app.request("/api/session", { headers: { Cookie: cookie } })
+        return (await response.json() as { authenticated: boolean }).authenticated
+      }
+      const firstExpiry = new Date(firstSession.claims.exp * 1000)
+      vi.setSystemTime(firstExpiry.getTime() - 1000)
+      expect(await isAuthenticated(firstSession.cookie)).toBe(true)
+      expect(await isAuthenticated(renewedSession.cookie)).toBe(true)
+
+      vi.setSystemTime(firstExpiry)
+      expect(await isAuthenticated(firstSession.cookie)).toBe(false)
+      expect(await isAuthenticated(renewedSession.cookie)).toBe(true)
+
+      const renewedExpiry = new Date(renewedSession.claims.exp * 1000)
+      vi.setSystemTime(renewedExpiry.getTime() - 1000)
+      expect(await isAuthenticated(renewedSession.cookie)).toBe(true)
+      vi.setSystemTime(renewedExpiry)
+      expect(await isAuthenticated(renewedSession.cookie)).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("throttles repeated wrong passwords without trusting forwarded headers", async () => {
