@@ -52,7 +52,7 @@ function Login({ onLogin }: { onLogin: (password: string) => Promise<void> }) {
       <form onSubmit={submit} aria-labelledby="login-title">
         <Stack gap="md">
           <Title id="login-title" order={1} size="h2">BP Journal</Title>
-          <PasswordInput label="Password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.currentTarget.value)} required />
+          <PasswordInput label="Password" size="md" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.currentTarget.value)} required />
           {error && <Text c="red" role="alert" size="sm">{error}</Text>}
           <Button type="submit" loading={busy}>Sign in</Button>
         </Stack>
