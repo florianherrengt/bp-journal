@@ -60,10 +60,10 @@ For a dedicated `bp-journal` hostname without changing your server's Tailscale n
 
 ```sh
 docker compose -f compose.yaml -f compose.tailscale.yaml up -d
-docker compose -f compose.yaml -f compose.tailscale.yaml logs --tail=30 tailscale
+docker compose -f compose.yaml -f compose.tailscale.yaml logs --follow tailscale
 ```
 
-Open the sign-in link in the logs and authorize the new device in your own tailnet. Then enable private HTTPS:
+When the sign-in link appears, open it and authorize the new device in your own tailnet. Press Ctrl+C to stop following the logs; the container keeps running. Initial sign-in has a ten-minute timeout. If the container restarts before you finish, use the newest link from its logs. Then enable private HTTPS:
 
 ```sh
 docker compose -f compose.yaml -f compose.tailscale.yaml exec tailscale tailscale serve --bg 3000
