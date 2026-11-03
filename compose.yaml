@@ -1,0 +1,15 @@
+services:
+  bp-tracker:
+    build: .
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      APP_PASSWORD: ${APP_PASSWORD:?Set APP_PASSWORD in .env}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+    volumes:
+      - readings:/app/data
+    restart: unless-stopped
+
+volumes:
+  readings:

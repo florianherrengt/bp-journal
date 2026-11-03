@@ -1,0 +1,12 @@
+node_modules
+dist
+.env
+.env.*
+.git
+data
+*.csv
+coverage
+test-results
+example.jpeg
+**/*.test.ts
+.playwright-mcp

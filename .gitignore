@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+data/
+*.csv
+coverage/
+test-results/
+.DS_Store
+example.jpeg
+.playwright-mcp/
