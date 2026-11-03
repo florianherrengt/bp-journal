@@ -14,7 +14,7 @@ docker compose up --build -d
 
 Open <http://localhost:3000> and sign in with `APP_PASSWORD`. `APP_URL` must exactly match the address in your browser. The supplied Compose file binds the port to this machine only; use Tailscale Serve or an HTTPS reverse proxy for remote access.
 
-Passwords have no minimum length, but a non-empty password is required. Each successful sign-in starts a one-year (365-day) session. Signing in again resets its expiry for another year.
+Passwords have no minimum length, but a non-empty password is required. Each successful sign-in starts a one-year (365-day) session. Opening or refreshing the app renews a valid session for another year without asking for the password again.
 
 The CSV is stored at `/app/data/readings.csv` in the persistent `readings` volume. Back it up; container replacement preserves it, but deleting the volume removes your readings. The app supports one server process writing this file.
 

@@ -177,8 +177,9 @@ describe("BP Tracker API", () => {
       expect(renewedSession.maxAge).toBe(yearInSeconds)
 
       const isAuthenticated = async (cookie: string) => {
-        const response = await app.request("/api/session", { headers: { Cookie: cookie } })
-        return (await response.json() as { authenticated: boolean }).authenticated
+        const response = await app.request("/api/readings", { headers: { Cookie: cookie } })
+        expect(response.headers.get("set-cookie")).toBeNull()
+        return response.status === 200
       }
       const firstExpiry = new Date(firstSession.claims.exp * 1000)
       vi.setSystemTime(firstExpiry.getTime() - 1000)
@@ -194,6 +195,81 @@ describe("BP Tracker API", () => {
       expect(await isAuthenticated(renewedSession.cookie)).toBe(true)
       vi.setSystemTime(renewedExpiry)
       expect(await isAuthenticated(renewedSession.cookie)).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("renews valid sessions on visits and rejects missing, invalid, or expired cookies", async () => {
+    vi.useFakeTimers()
+    try {
+      const signInTime = new Date("2025-01-01T12:00:00.000Z")
+      vi.setSystemTime(signInTime)
+      const { app } = await setup()
+      const firstLogin = await app.request("/api/login", {
+        method: "POST",
+        headers: { Origin: origin, "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      })
+      const getSession = (cookie?: string) => app.request("/api/session", {
+        headers: cookie ? { Cookie: cookie } : {},
+      })
+      const sessionFrom = (response: Response) => {
+        const serialized = response.headers.get("set-cookie")!
+        const cookie = serialized.split(";", 1)[0]!
+        const token = cookie.slice("bp_session=".length)
+        const claims = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8")) as {
+          iat: number
+          exp: number
+        }
+        return { cookie, claims, serialized }
+      }
+      const authenticated = async (cookie: string) =>
+        (await app.request("/api/readings", { headers: { Cookie: cookie } })).status === 200
+
+      expect(firstLogin.status).toBe(200)
+      const firstSession = sessionFrom(firstLogin)
+      const anonymous = await getSession()
+      expect(await anonymous.json()).toEqual({ authenticated: false })
+      expect(anonymous.headers.get("set-cookie")).toBeNull()
+
+      const token = firstSession.cookie.slice("bp_session=".length)
+      const signatureStart = token.lastIndexOf(".") + 1
+      const firstCharacter = token[signatureStart] === "a" ? "b" : "a"
+      const tamperedCookie = `bp_session=${token.slice(0, signatureStart)}${firstCharacter}${token.slice(signatureStart + 1)}`
+      const tampered = await getSession(tamperedCookie)
+      expect(await tampered.json()).toEqual({ authenticated: false })
+      expect(tampered.headers.get("set-cookie")).toBeNull()
+
+      const yearInMilliseconds = 365 * 24 * 60 * 60 * 1000
+      const renewalTime = new Date(signInTime.getTime() + 180 * 24 * 60 * 60 * 1000)
+      vi.setSystemTime(renewalTime)
+      const renewal = await getSession(firstSession.cookie)
+      expect(await renewal.json()).toEqual({ authenticated: true })
+      const renewedSession = sessionFrom(renewal)
+      expect(renewedSession.claims.iat).toBe(Math.floor(renewalTime.getTime() / 1000))
+      expect(renewedSession.claims.exp - renewedSession.claims.iat).toBe(yearInMilliseconds / 1000)
+      expect(renewedSession.serialized).toContain("Max-Age=31536000")
+      expect(renewedSession.serialized).toContain("HttpOnly")
+      expect(renewedSession.serialized).toContain("Secure")
+      expect(renewedSession.serialized).toContain("SameSite=Strict")
+
+      const originalExpiry = new Date(firstSession.claims.exp * 1000)
+      vi.setSystemTime(originalExpiry)
+      const expired = await getSession(firstSession.cookie)
+      expect(await expired.json()).toEqual({ authenticated: false })
+      expect(expired.headers.get("set-cookie")).toBeNull()
+      expect(await authenticated(firstSession.cookie)).toBe(false)
+      expect(await authenticated(renewedSession.cookie)).toBe(true)
+
+      const renewedExpiry = new Date(renewedSession.claims.exp * 1000)
+      vi.setSystemTime(renewedExpiry.getTime() - 1000)
+      expect(await authenticated(renewedSession.cookie)).toBe(true)
+      vi.setSystemTime(renewedExpiry)
+      const expiredRenewal = await getSession(renewedSession.cookie)
+      expect(await expiredRenewal.json()).toEqual({ authenticated: false })
+      expect(expiredRenewal.headers.get("set-cookie")).toBeNull()
+      expect(await authenticated(renewedSession.cookie)).toBe(false)
     } finally {
       vi.useRealTimers()
     }

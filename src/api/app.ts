@@ -85,6 +85,22 @@ export function createApp(config: AppConfig, options: AppOptions = {}) {
     }
   }
 
+  async function issueSession(c: Context, time: number) {
+    const issuedAt = Math.floor(time / 1000)
+    const token = await sign({
+      sub: "bp-owner",
+      iat: issuedAt,
+      exp: issuedAt + SESSION_SECONDS,
+    }, config.sessionSecret)
+    setCookie(c, COOKIE_NAME, token, {
+      httpOnly: true,
+      secure: config.secureCookies,
+      sameSite: "Strict",
+      path: "/",
+      maxAge: SESSION_SECONDS,
+    })
+  }
+
   const requireLogin = async (c: Context, next: Next) => {
     if (!(await authenticated(c))) return c.json({ error: "Sign in to continue." }, 401)
     await next()
@@ -206,24 +222,15 @@ export function createApp(config: AppConfig, options: AppOptions = {}) {
     }
 
     failedLogins.delete(remote)
-    const token = await sign({
-      sub: "bp-owner",
-      iat: Math.floor(time / 1000),
-      exp: Math.floor(time / 1000) + SESSION_SECONDS,
-    }, config.sessionSecret)
-    setCookie(c, COOKIE_NAME, token, {
-      httpOnly: true,
-      secure: config.secureCookies,
-      sameSite: "Strict",
-      path: "/",
-      maxAge: SESSION_SECONDS,
-    })
+    await issueSession(c, time)
     return c.json({ ok: true })
   })
 
-  app.get("/api/session", async (c) =>
-    c.json({ authenticated: await authenticated(c) }),
-  )
+  app.get("/api/session", async (c) => {
+    const isAuthenticated = await authenticated(c)
+    if (isAuthenticated) await issueSession(c, now().getTime())
+    return c.json({ authenticated: isAuthenticated })
+  })
 
   app.post("/api/logout", checkOrigin, (c) => {
     deleteCookie(c, COOKIE_NAME, {
