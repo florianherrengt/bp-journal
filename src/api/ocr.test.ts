@@ -79,6 +79,22 @@ describe("local blood-pressure photo recognition", () => {
     await expect(recognizeReading(photo)).resolves.toEqual({ sys: 128, dia: 76, pul: 61 })
   })
 
+  it("keeps adaptive digit isolation when compression leaves only short background runs", async () => {
+    const photo = await makeMonitor({ sys: 116, dia: 67, pul: 61 })
+    const background = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600">
+      <rect x="425" y="735" width="61" height="176" fill="#4a4a4a"/>
+      <rect x="491" y="735" width="55" height="176" fill="#4a4a4a"/>
+      <rect x="629" y="735" width="55" height="176" fill="#4a4a4a"/>
+      <rect x="713" y="735" width="31" height="176" fill="#4a4a4a"/>
+    </svg>`)
+    const withDarkBackground = await sharp(photo)
+      .composite([{ input: background }])
+      .jpeg({ quality: 90, chromaSubsampling: "4:4:4" })
+      .toBuffer()
+    await expect(recognizeReading(await browserCompressed(withDarkBackground)))
+      .resolves.toEqual({ sys: 116, dia: 67, pul: 61 })
+  })
+
   it("recognizes the UA611 Plus seven segment seven with its upper-left bar", async () => {
     await expect(recognizeReading(await monitorWithUa611SevenStyle())).resolves.toEqual({ sys: 128, dia: 76, pul: 61 })
   })

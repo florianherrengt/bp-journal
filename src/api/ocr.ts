@@ -98,8 +98,8 @@ function readDigits(image: Image, row: Box, label: Box): number {
   for (let y = roi.y0; y < roi.y1; y++) for (let x = roi.x0; x < roi.x1; x++) {
     if (image.data[y * image.width + x]! <= 85) backgroundPixels++
   }
-  const adaptiveThreshold = backgroundPixels / ((roi.x1 - roi.x0) * (roi.y1 - roi.y0)) > 0.5 &&
-    fixedRuns.some(([start, end]) => end - start + 1 > labelHeight * 2.4)
+  // JPEG compression can split the ink run without changing the dark-background condition.
+  const adaptiveThreshold = backgroundPixels / ((roi.x1 - roi.x0) * (roi.y1 - roi.y0)) > 0.5
   const columnThreshold = new Array<number>(roi.x1 - roi.x0)
   const rowColumnThreshold = new Array<number>(roi.x1 - roi.x0)
   for (let x = roi.x0; x < roi.x1; x++) {
