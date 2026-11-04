@@ -143,6 +143,18 @@ export function createApp(config: AppConfig, options: AppOptions = {}) {
             }
           }
 
+          for (const [metric, value, min, max, unit] of [
+            ["systolic pressure", values.sys, 60, 279, "mmHg"],
+            ["diastolic pressure", values.dia, 40, 200, "mmHg"],
+            ["pulse", values.pul, 40, 180, "bpm"],
+          ] as const) {
+            if (value < min || value > max) {
+              throw new PhotoRecognitionError(
+                `BP Journal read a ${metric} of ${value} ${unit}. The UA-611Plus supports ${min}–${max} ${unit}. Check the display and try a clearer photo.`,
+              )
+            }
+          }
+
           reading = {
             id: upload.job.id,
             capturedAt: upload.capturedAt,

@@ -43,7 +43,7 @@ async function setup(options: Parameters<typeof createApp>[1] = {}) {
   return { app, config, signIn, directory }
 }
 
-async function uploadReading(app: ReturnType<typeof createApp>, cookie: string) {
+async function uploadReading(app: ReturnType<typeof createApp>, cookie: string, expectedStatus: "saved" | "error" = "saved") {
   const form = new FormData()
   form.set("photo", new File([imageBytes], "reading.jpg", { type: "image/jpeg" }))
   const response = await app.request("/api/uploads", {
@@ -60,7 +60,7 @@ async function uploadReading(app: ReturnType<typeof createApp>, cookie: string) 
     if (job?.status !== "processing") break
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
-  expect(job?.status).toBe("saved")
+  expect(job?.status).toBe(expectedStatus)
   return id
 }
 
@@ -544,6 +544,11 @@ describe("BP Tracker API", () => {
 
   it.each([
     {
+      scenario: "a display with a pulse of 743 bpm",
+      photo: () => makeMonitor({ sys: 116, dia: 67, pul: 743 }),
+      message: "Photo uploaded. BP Journal read a pulse of 743 bpm. The UA-611Plus supports 40–180 bpm. Check the display and try a clearer photo. No reading was saved.",
+    },
+    {
       scenario: "a labeled display with an unreadable diastolic number",
       photo: () => makeMonitor({ sys: 116, dia: "E1", pul: 61 }),
       message: "Photo uploaded. BP Journal found the DIA label but couldn't read the diastolic number. Try a closer photo with the full display visible. No reading was saved.",
@@ -577,6 +582,23 @@ describe("BP Tracker API", () => {
     }, { timeout: 4_000 }).toMatchObject({ id, status: "error", error: message })
     expect(await (await app.request("/api/readings", { headers: { Cookie: cookie } })).json())
       .toEqual({ readings: [] })
+  })
+
+  it.each([
+    { sys: 60, dia: 40, pul: 40, status: "saved" },
+    { sys: 279, dia: 200, pul: 180, status: "saved" },
+    { sys: 59, dia: 67, pul: 61, status: "error" },
+    { sys: 280, dia: 67, pul: 61, status: "error" },
+    { sys: 116, dia: 39, pul: 61, status: "error" },
+    { sys: 250, dia: 201, pul: 61, status: "error" },
+    { sys: 116, dia: 67, pul: 39, status: "error" },
+    { sys: 116, dia: 67, pul: 181, status: "error" },
+  ] as const)("reports $status for UA-611Plus readings $sys/$dia with pulse $pul", async ({ status, ...values }) => {
+    const { app, signIn } = await setup({ recognize: async () => values })
+    const cookie = await signIn()
+    const id = await uploadReading(app, cookie, status)
+    const { readings } = await (await app.request("/api/readings", { headers: { Cookie: cookie } })).json()
+    expect(readings).toEqual(status === "saved" ? [expect.objectContaining({ id, ...values })] : [])
   })
 
   it("reports a storage failure separately and preserves malformed CSV bytes", async () => {
