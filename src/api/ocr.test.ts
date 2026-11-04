@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import sharp from "sharp"
 import { makeMonitor } from "../../tests/fixtures/monitor.ts"
@@ -58,6 +59,17 @@ async function browserCompressed(photo: Buffer): Promise<Buffer> {
 
 describe("local blood-pressure photo recognition", () => {
   afterAll(async () => closeOcr())
+
+  it.each([
+    { file: "IMG_4912.jpeg", expected: { sys: 116, dia: 67, pul: 61 } },
+    { file: "IMG_4914.jpeg", expected: { sys: 119, dia: 83, pul: 63 } },
+    { file: "IMG_4917.jpeg", expected: { sys: 130, dia: 70, pul: 63 } },
+    { file: "IMG_4918.jpeg", expected: { sys: 127, dia: 68, pul: 64 } },
+    { file: "IMG_4919.jpeg", expected: { sys: 118, dia: 82, pul: 65 } },
+  ])("reads the exact display values in $file", async ({ file, expected }) => {
+    const photo = await readFile(new URL(`../../tests/fixtures/photos/${file}`, import.meta.url))
+    await expect(recognizeReading(photo)).resolves.toEqual(expected)
+  })
 
   it.each(["888", "456", "789", "101", "116", "967", "990"])(
     "reads three digit monitor values containing %s",

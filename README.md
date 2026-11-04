@@ -30,7 +30,7 @@ npm run build
 npm start
 ```
 
-The Node setup stores user CSVs in `./data` by default. Set `DATA_DIR` to use another location. Credentials, readings, photos and generated files should stay outside Git. There is no default installation password. A username's readings are stored in `<DATA_DIR>/<username>.csv`.
+The Node setup stores user CSVs in `./data` by default. Set `DATA_DIR` to use another location. Credentials, journal data, original photos and generated files should stay outside Git. There is no default installation password. A username's readings are stored in `<DATA_DIR>/<username>.csv`.
 
 For development, set `APP_URL=http://localhost:5173`, then run `npm run dev` and `npm run dev:web` in separate terminals. The Vite page proxies API requests to the Node server on port 3000.
 
@@ -94,6 +94,6 @@ npm run check
 npm audit
 ```
 
-Tests use generated monitor images to cover two- and three-digit values, rotation, resizing, incomplete digits, error displays and saving recognized values through the API into the CSV. No personal photos or reading history are included. Accuracy across a larger set of real phone photos has not yet been established.
+Tests use generated monitor images to cover two- and three-digit values, rotation, resizing, incomplete digits, error displays and saving recognized values through the API into the CSV. The OCR suite also runs the real recognizer on reference monitor photos in [`tests/fixtures/photos`](tests/fixtures/photos) and checks the exact systolic, diastolic and pulse values. These JPEGs are sized like uploads and contain no camera metadata. To add a reference, add a metadata-free JPEG and record the values shown on its display in [`src/api/ocr.test.ts`](src/api/ocr.test.ts).
 
 The tracker is licensed under the [MIT License](LICENSE). The bundled English OCR model is separately licensed under [Apache-2.0](assets/tessdata/LICENSE); its source revision and checksum are documented in [assets/tessdata/README.md](assets/tessdata/README.md).
