@@ -94,6 +94,8 @@ npm run check
 npm audit
 ```
 
-Tests use generated monitor images to cover two- and three-digit values, rotation, resizing, incomplete digits, error displays and saving recognized values through the API into the CSV. The OCR suite also runs the real recognizer on reference monitor photos in [`tests/fixtures/photos`](tests/fixtures/photos) and checks the exact systolic, diastolic and pulse values. These JPEGs are sized like uploads and contain no camera metadata. To add a reference, add a metadata-free JPEG and record the values shown on its display in [`src/api/ocr.test.ts`](src/api/ocr.test.ts).
+Tests use generated monitor images to cover two- and three-digit values, rotation, resizing, incomplete digits, error displays and saving recognized values through the API into the CSV. The OCR suite also runs the real recognizer on reference monitor photos in [`tests/fixtures/photos`](tests/fixtures/photos) and checks the exact systolic, diastolic and pulse values. These JPEGs are sized like uploads and contain no camera metadata.
+
+If a photo fails or returns the wrong numbers, use the [OCR troubleshooting guide](OCR-TROUBLESHOOTING.md) to report it to an agent and turn it into a regression test and pull request.
 
 The tracker is licensed under the [MIT License](LICENSE). The bundled English OCR model is separately licensed under [Apache-2.0](assets/tessdata/LICENSE); its source revision and checksum are documented in [assets/tessdata/README.md](assets/tessdata/README.md).
