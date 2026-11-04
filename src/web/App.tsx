@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import type { FormEvent } from "react"
-import { Anchor, Button, Container, FileButton, Group, PasswordInput, Progress, Stack, Text, Title } from "@mantine/core"
+import { Anchor, Button, Container, FileButton, Group, PasswordInput, Progress, Stack, Text, TextInput, Title } from "@mantine/core"
 import moment from "moment"
 import type { Arm, Reading, UploadJob } from "../shared.ts"
 import { preparePhoto } from "./image.ts"
@@ -30,7 +30,8 @@ async function jsonFetch<T>(
   return response.json() as Promise<T>
 }
 
-function Login({ onLogin }: { onLogin: (password: string) => Promise<void> }) {
+function Login({ onLogin }: { onLogin: (username: string, password: string) => Promise<void> }) {
+  const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
@@ -40,7 +41,7 @@ function Login({ onLogin }: { onLogin: (password: string) => Promise<void> }) {
     setBusy(true)
     setError("")
     try {
-      await onLogin(password)
+      await onLogin(username, password)
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : "Could not sign in.")
       setBusy(false)
@@ -52,6 +53,7 @@ function Login({ onLogin }: { onLogin: (password: string) => Promise<void> }) {
       <form onSubmit={submit} aria-labelledby="login-title">
         <Stack gap="md">
           <Title id="login-title" order={1} size="h2">BP Journal</Title>
+          <TextInput label="Username" size="md" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} maxLength={251} value={username} onChange={(event) => setUsername(event.currentTarget.value.toLowerCase())} required />
           <PasswordInput label="Password" size="md" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.currentTarget.value)} required />
           {error && <Text c="red" role="alert" size="sm">{error}</Text>}
           <Button type="submit" loading={busy}>Sign in</Button>
@@ -211,7 +213,7 @@ function UploadStatus({ jobs }: { jobs: UploadJob[] }) {
         <Text key={job.id} size="sm" c={job.status === "error" ? "red" : undefined} role={job.status === "error" ? "alert" : undefined}>
           {job.status === "processing" && "Reading photo… You can close this page."}
           {job.status === "saved" && (job.reading ? `Saved · ${moment(job.reading.capturedAt).format("D MMM, HH:mm")} · SYS ${job.reading.sys} / DIA ${job.reading.dia} · PUL ${job.reading.pul}` : "Reading saved.")}
-          {job.status === "error" && `Couldn’t save reading: ${job.error ?? "Please try again."}`}
+          {job.status === "error" && (job.error ?? "Photo uploaded. The server reported a failure but didn’t provide a reason. No reading was saved.")}
         </Text>
       ))}
     </section>
@@ -219,7 +221,7 @@ function UploadStatus({ jobs }: { jobs: UploadJob[] }) {
 }
 
 function Application() {
-  const [session, setSession] = useState<boolean | null>(null)
+  const [session, setSession] = useState<string | null | undefined>(undefined)
   const [readings, setReadings] = useState<Reading[]>([])
   const [jobs, setJobs] = useState<UploadJob[]>([])
   const [arm, setArm] = useState<"left" | "right" | null>(null)
@@ -228,18 +230,20 @@ function Application() {
   const [notice, setNotice] = useState("")
   const [pageError, setPageError] = useState("")
   const resetFileRef = useRef<(() => void) | null>(null)
-  const sessionRef = useRef(false)
+  const sessionRef = useRef<string | null>(null)
   const mountedRef = useRef(false)
   const refreshedJobIds = useRef(new Set<string>())
 
   const refreshReadings = useCallback(async () => {
+    const username = sessionRef.current
     const result = await jsonFetch<{ readings: Reading[] }>("/api/readings")
-    if (mountedRef.current && sessionRef.current) setReadings(result.readings)
+    if (mountedRef.current && username && sessionRef.current === username) setReadings(result.readings)
   }, [])
 
   const refreshJobs = useCallback(async () => {
+    const username = sessionRef.current
     const result = await jsonFetch<{ uploads: UploadJob[] }>("/api/uploads")
-    if (!mountedRef.current || !sessionRef.current) return []
+    if (!mountedRef.current || !username || sessionRef.current !== username) return []
 
     setJobs(result.uploads)
     const newlySaved = result.uploads.filter((job) =>
@@ -254,7 +258,7 @@ function Application() {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
-      sessionRef.current = false
+      sessionRef.current = null
     }
   }, [])
 
@@ -262,16 +266,16 @@ function Application() {
     let active = true
     async function load() {
       try {
-        const result = await jsonFetch<{ authenticated: boolean }>("/api/session")
+        const result = await jsonFetch<{ username: string | null }>("/api/session")
         if (!active) return
-        sessionRef.current = result.authenticated
-        setSession(result.authenticated)
-        if (result.authenticated) {
+        sessionRef.current = result.username
+        setSession(result.username)
+        if (result.username) {
           const [history, uploads] = await Promise.all([
             jsonFetch<{ readings: Reading[] }>("/api/readings"),
             jsonFetch<{ uploads: UploadJob[] }>("/api/uploads"),
           ])
-          if (active && sessionRef.current) {
+          if (active && sessionRef.current === result.username) {
             for (const job of uploads.uploads) {
               if (job.status === "saved") refreshedJobIds.current.add(job.id)
             }
@@ -281,9 +285,9 @@ function Application() {
         }
       } catch (problem) {
         if (active && mountedRef.current) {
-          sessionRef.current = false
+          sessionRef.current = null
           setPageError(problem instanceof Error ? problem.message : "Could not connect to the tracker.")
-          setSession(false)
+          setSession(null)
         }
       }
     }
@@ -297,14 +301,14 @@ function Application() {
     let active = true
     let polling = false
     const timer = window.setInterval(() => {
-      if (polling || !sessionRef.current) return
+      if (polling || sessionRef.current !== session) return
       polling = true
       void refreshJobs().catch((problem: unknown) => {
-        if (active && sessionRef.current) {
+        if (active && sessionRef.current === session) {
           setPageError(problem instanceof Error ? problem.message : "Could not refresh the latest readings.")
           if (problem instanceof RequestError && problem.status === 401) {
-            sessionRef.current = false
-            setSession(false)
+            sessionRef.current = null
+            setSession(null)
             setReadings([])
             setJobs([])
           }
@@ -314,11 +318,11 @@ function Application() {
     return () => { active = false; window.clearInterval(timer) }
   }, [session, hasProcessing, refreshJobs])
 
-  async function login(value: string) {
-    await jsonFetch<{ ok: true }>("/api/login", {
+  async function login(username: string, password: string) {
+    const result = await jsonFetch<{ ok: true; username: string }>("/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: value }),
+      body: JSON.stringify({ username, password }),
     }, "The password is incorrect.")
     const [history, uploads] = await Promise.all([
       jsonFetch<{ readings: Reading[] }>("/api/readings"),
@@ -327,32 +331,40 @@ function Application() {
     for (const job of uploads.uploads) {
       if (job.status === "saved") refreshedJobIds.current.add(job.id)
     }
-    sessionRef.current = true
+    sessionRef.current = result.username
     setPageError("")
-    setSession(true)
+    setSession(result.username)
     setReadings(history.readings)
     setJobs(uploads.uploads)
   }
 
   async function logout() {
-    sessionRef.current = false
-    setSession(false)
+    sessionRef.current = null
+    setSession(undefined)
     setReadings([])
     setJobs([])
+    setNotice("")
     try {
       await jsonFetch<{ ok: true }>("/api/logout", { method: "POST" })
     } catch (problem) {
       setPageError(problem instanceof Error ? problem.message : "Could not sign out.")
+    } finally {
+      setSession(null)
     }
   }
 
   function upload(file: File, selectedArm: "left" | "right" | null) {
+    const username = sessionRef.current
     setUploading(true)
     setUploadPercent(0)
     setNotice("Preparing photo…")
     setPageError("")
 
     void preparePhoto(file).then((photo) => new Promise<void>((resolve, reject) => {
+      if (!mountedRef.current || !username || sessionRef.current !== username) {
+        resolve()
+        return
+      }
       const body = new FormData()
       body.append("photo", photo.image, "reading.jpg")
       body.append("arm", armLabel(selectedArm))
@@ -377,7 +389,7 @@ function Application() {
           reject(new Error("The server received the photo but did not return a tracking status."))
           return
         }
-        if (mountedRef.current && sessionRef.current) {
+        if (mountedRef.current && sessionRef.current === username) {
           const uploadedJob: UploadJob = {
             ...(payload as UploadJob),
             id: payload.id,
@@ -388,7 +400,7 @@ function Application() {
           setNotice("")
           setUploadPercent(100)
           void refreshJobs().catch((problem: unknown) => {
-            if (mountedRef.current && sessionRef.current) {
+            if (mountedRef.current && sessionRef.current === username) {
               setPageError(problem instanceof Error ? problem.message : "Could not refresh the latest readings.")
             }
           })
@@ -397,7 +409,7 @@ function Application() {
       }
       request.send(body)
     })).catch((problem: unknown) => {
-      if (mountedRef.current && sessionRef.current) {
+      if (mountedRef.current && sessionRef.current === username) {
         setPageError(problem instanceof Error ? problem.message : "Could not process this photo.")
         setNotice("")
       }
@@ -408,8 +420,8 @@ function Application() {
     })
   }
 
-  if (session === null) {
-    return <Container size={640} className="app-shell"><Text c="dimmed">Opening your journal…</Text></Container>
+  if (session === undefined) {
+    return <Container size={640} className="app-shell"><Text c="dimmed">Please wait…</Text></Container>
   }
   if (!session) {
     return <>
@@ -424,7 +436,8 @@ function Application() {
         <Group justify="space-between" align="center">
           <Title order={1} size="h2">BP Journal</Title>
           <Group gap="md">
-            <Anchor href="/api/readings.csv" download="blood-pressure-readings.csv" size="sm">CSV</Anchor>
+            <Text size="sm">{session}</Text>
+            <Anchor href="/api/readings.csv" download={`${session}.csv`} size="sm">CSV</Anchor>
             <Anchor component="button" type="button" onClick={() => void logout()} size="sm">Sign out</Anchor>
           </Group>
         </Group>

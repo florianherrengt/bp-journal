@@ -1,3 +1,5 @@
+import { resolve } from "node:path"
+
 import { describe, expect, it } from "vitest"
 
 import { readConfig } from "./config.ts"
@@ -9,11 +11,17 @@ describe("runtime configuration", () => {
     const config = readConfig({ APP_PASSWORD: password })
     expect(config.password).toBe(password)
     expect(config.appOrigin).toBe("http://localhost:3000")
+    expect(config.dataDir).toBe(resolve("data"))
     expect(config.secureCookies).toBe(false)
     expect(config.maxUploadBytes).toBe(8 * 1024 * 1024)
     expect(config.port).toBe(3000)
     expect(config.host).toBe("0.0.0.0")
     expect(config.sessionSecret).toHaveLength(43)
+  })
+
+  it("uses the configured directory for per-user reading files", () => {
+    const config = readConfig({ APP_PASSWORD: password, DATA_DIR: "/srv/bp-journal" })
+    expect(config.dataDir).toBe("/srv/bp-journal")
   })
 
   it("requires a shared password and a safe configured session key", () => {

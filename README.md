@@ -1,8 +1,8 @@
 # BP Journal
 
-A small, self-hosted blood-pressure photo journal. Select a JPEG of your monitor and it uploads immediately. The server reads SYS, DIA and PUL locally and appends the reading to one CSV file. The minimal Mantine interface shows a chart of all three metrics, with the full history available as a CSV download.
+A small, self-hosted blood-pressure photo journal. Select a JPEG of your monitor and it uploads immediately. The server reads SYS, DIA and PUL locally and appends the reading to a CSV named after the signed-in user. The minimal Mantine interface shows a chart of all three metrics, with the full history available as a CSV download.
 
-There are no cloud OCR services, API keys, external fonts or runtime model downloads. The included English OCR model and image-processing libraries run on your server. The web app is protected by one shared password per installation.
+There are no cloud OCR services, API keys, external fonts or runtime model downloads. The included English OCR model and image-processing libraries run on your server. The web app is protected by one shared password per installation. Anyone can sign in with any username; capitalization is converted to lowercase, and that username selects the user's journal file.
 
 ## Run with Docker
 
@@ -12,11 +12,11 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
-Open <http://localhost:3000> and sign in with `APP_PASSWORD`. `APP_URL` must exactly match the address in your browser. The supplied Compose file binds the port to this machine only; use Tailscale Serve or an HTTPS reverse proxy for remote access.
+Open <http://localhost:3000>, choose a username, and sign in with `APP_PASSWORD`. Usernames may contain lowercase letters, numbers, hyphens and underscores. `Florian` and `florian` use the same journal. `APP_URL` must exactly match the address in your browser. The supplied Compose file binds the port to this machine only; use Tailscale Serve or an HTTPS reverse proxy for remote access.
 
 Passwords have no minimum length, but a non-empty password is required. Each successful sign-in starts a one-year (365-day) session. Opening or refreshing the app renews a valid session for another year without asking for the password again.
 
-The CSV is stored at `/app/data/readings.csv` in the persistent `readings` volume. Back it up; container replacement preserves it, but deleting the volume removes your readings. The app supports one server process writing this file.
+Each user's CSV is stored as `/app/data/<username>.csv` in the persistent `readings` volume; for example, `florian.csv`. Back up this directory; container replacement preserves it, but deleting the volume removes all readings. A new username starts with an empty journal. The app supports one server process writing these files.
 
 ## Run with Node
 
@@ -30,7 +30,7 @@ npm run build
 npm start
 ```
 
-The Node setup stores readings in `./data/readings.csv` by default. Set `DATA_FILE` to use another location. Credentials, readings, photos and generated files should stay outside Git. There is no default installation password.
+The Node setup stores user CSVs in `./data` by default. Set `DATA_DIR` to use another location. Credentials, readings, photos and generated files should stay outside Git. There is no default installation password. A username's readings are stored in `<DATA_DIR>/<username>.csv`.
 
 For development, set `APP_URL=http://localhost:5173`, then run `npm run dev` and `npm run dev:web` in separate terminals. The Vite page proxies API requests to the Node server on port 3000.
 
@@ -73,7 +73,7 @@ docker compose -f compose.yaml -f compose.tailscale.yaml exec tailscale tailscal
 
 Set `APP_URL` to the exact address Serve reports, normally `https://bp-journal.<your-tailnet>.ts.net`, and run the two-file `up -d` command again. Use both Compose files for subsequent starts, updates and restarts so the app and its Tailscale container stay connected.
 
-The Tailscale container uses userspace networking without extra network capabilities or a TUN device. Its identity and HTTPS configuration persist in the `tailscale-state` volume; retain that volume to avoid authorizing a new device after recreation. The separate `readings` volume holds your CSV. This setup uses Tailscale Serve, keeping the app private to your tailnet.
+The Tailscale container uses userspace networking without extra network capabilities or a TUN device. Its identity and HTTPS configuration persist in the `tailscale-state` volume; retain that volume to avoid authorizing a new device after recreation. The separate `readings` volume holds the users' CSV files. This setup uses Tailscale Serve, keeping the app private to your tailnet.
 
 For internet access, put the app behind an HTTPS reverse proxy and set `APP_URL` to its public origin, such as `https://bp.example.com`. Login cookies become Secure automatically when `APP_URL` uses HTTPS. Do not publish the development server. Requests from a different browser origin are rejected. `HOST` and `PORT` configure the Node listener; the container listens on `0.0.0.0:3000` internally.
 
@@ -81,13 +81,13 @@ For internet access, put the app behind an HTTPS reverse proxy and set `APP_URL`
 
 ## Data and checks
 
-The CSV schema is:
+Each user's CSV schema is:
 
 ```csv
 id,captured_at,sys,dia,pul,arm
 ```
 
-SYS and DIA are in mmHg; PUL is in beats per minute. Each accepted reading has a UUID. Uploading the same photo twice creates two readings. Downloads include the full history. Empty files are initialized on first save; malformed, non-empty CSV files are rejected without being overwritten.
+SYS and DIA are in mmHg; PUL is in beats per minute. Each accepted reading has a UUID. Uploading the same photo twice creates two readings. Downloads include the signed-in user's full history and use the username as the downloaded filename. Empty files are initialized on first save; malformed, non-empty CSV files are rejected without being overwritten. Readings from the previous single-file setup are not imported; every username starts with an empty journal.
 
 ```sh
 npm run check

@@ -1,13 +1,15 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
+import sharp from "sharp"
 
 import { createApp } from "./app.ts"
 import type { AppConfig } from "./config.ts"
 import { closeOcr } from "./ocr.ts"
 import { makeMonitor } from "../../tests/fixtures/monitor.ts"
+import { sign } from "hono/jwt"
 
 const directories: string[] = []
 const origin = "https://bp.example.test"
@@ -20,7 +22,7 @@ async function setup(options: Parameters<typeof createApp>[1] = {}) {
     password,
     sessionSecret: "x".repeat(43),
     appOrigin: origin,
-    csvPath: join(directory, "readings.csv"),
+    dataDir: directory,
     secureCookies: true,
     maxUploadBytes: 8 * 1024 * 1024,
     host: "127.0.0.1",
@@ -28,17 +30,38 @@ async function setup(options: Parameters<typeof createApp>[1] = {}) {
   }
   const app = createApp(config, options)
 
-  async function signIn() {
+  async function signIn(username = "florian") {
     const response = await app.request("/api/login", {
       method: "POST",
       headers: { Origin: origin, "Content-Type": "application/json" },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ username, password }),
     })
     expect(response.status).toBe(200)
     return response.headers.get("set-cookie")!.split(";")[0]!
   }
 
-  return { app, config, signIn }
+  return { app, config, signIn, directory }
+}
+
+async function uploadReading(app: ReturnType<typeof createApp>, cookie: string) {
+  const form = new FormData()
+  form.set("photo", new File([imageBytes], "reading.jpg", { type: "image/jpeg" }))
+  const response = await app.request("/api/uploads", {
+    method: "POST",
+    headers: { Origin: origin, Cookie: cookie },
+    body: form,
+  })
+  expect(response.status).toBe(202)
+  const { id } = await response.json() as { id: string }
+  const deadline = Date.now() + 2_000
+  let job: { id: string; status: string } | undefined
+  while (Date.now() < deadline) {
+    job = await (await app.request(`/api/uploads/${id}`, { headers: { Cookie: cookie } })).json() as typeof job
+    if (job?.status !== "processing") break
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  expect(job?.status).toBe("saved")
+  return id
 }
 
 afterEach(async () => {
@@ -82,13 +105,13 @@ describe("BP Tracker API", () => {
     })
     const saved = await (await app.request("/api/readings", { headers: { Cookie: cookie } })).json() as { readings: unknown[] }
     expect(saved.readings).toEqual([job?.reading])
-    expect(await readFile(config.csvPath, "utf8")).toContain(`${id},2025-04-15T09:30:00.000Z,128,76,61,unknown`)
+    expect(await readFile(join(config.dataDir, "florian.csv"), "utf8")).toContain(`${id},2025-04-15T09:30:00.000Z,128,76,61,unknown`)
   })
 
   it("keeps readings private until the shared password succeeds", async () => {
     const { app } = await setup()
     expect((await app.request("/api/session")).status).toBe(200)
-    expect(await (await app.request("/api/session")).json()).toEqual({ authenticated: false })
+    expect(await (await app.request("/api/session")).json()).toEqual({ authenticated: false, username: null })
     expect((await app.request("/api/readings")).status).toBe(401)
     expect((await app.request("/api/readings.csv")).status).toBe(401)
 
@@ -110,14 +133,14 @@ describe("BP Tracker API", () => {
       const response = await app.request("/api/login", {
         method: "POST",
         headers: { Origin: origin, "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ username: "florian", password }),
       })
       expect(response.headers.get("set-cookie")).toContain("HttpOnly")
       expect(response.headers.get("set-cookie")).toContain("Secure")
       return response.headers.get("set-cookie")!.split(";")[0]!
     })()
 
-    expect(await (await app.request("/api/session", { headers: { Cookie: cookie } })).json()).toEqual({ authenticated: true })
+    expect(await (await app.request("/api/session", { headers: { Cookie: cookie } })).json()).toEqual({ authenticated: true, username: "florian" })
     const readingsResponse = await app.request("/api/readings", { headers: { Cookie: cookie } })
     expect(readingsResponse.status).toBe(200)
     expect(readingsResponse.headers.get("cache-control")).toBe("no-store")
@@ -133,6 +156,133 @@ describe("BP Tracker API", () => {
     expect(loggedOut.headers.get("set-cookie")).toContain("Max-Age=0")
   })
 
+  it("normalizes usernames and keeps each user's CSV and downloads separate across app restarts", async () => {
+    const recognize = async () => ({ sys: 128, dia: 76, pul: 61 })
+    const { app, config, signIn } = await setup({ recognize })
+    const aliceCookie = await signIn("ALIce")
+    const bobCookie = await signIn("bob_2")
+
+    expect(await (await app.request("/api/session", { headers: { Cookie: aliceCookie } })).json())
+      .toEqual({ authenticated: true, username: "alice" })
+    expect(await (await app.request("/api/readings", { headers: { Cookie: aliceCookie } })).json())
+      .toEqual({ readings: [] })
+
+    const aliceId = await uploadReading(app, aliceCookie)
+    const bobId = await uploadReading(app, bobCookie)
+    expect(aliceId).not.toBe(bobId)
+    expect(await readdir(config.dataDir)).toEqual(["alice.csv", "bob_2.csv"])
+
+    const aliceCsv = await app.request("/api/readings.csv", { headers: { Cookie: aliceCookie } })
+    expect(aliceCsv.headers.get("content-disposition")).toContain('filename="alice.csv"')
+    expect(await aliceCsv.text()).toContain(aliceId)
+    const bobCsv = await app.request("/api/readings.csv", { headers: { Cookie: bobCookie } })
+    expect(bobCsv.headers.get("content-disposition")).toContain('filename="bob_2.csv"')
+    expect(await bobCsv.text()).toContain(bobId)
+
+    const restarted = createApp(config, { recognize })
+    const aliceAgain = await (async () => {
+      const response = await restarted.request("/api/login", {
+        method: "POST",
+        headers: { Origin: origin, "Content-Type": "application/json" },
+        body: JSON.stringify({ username: "alice", password }),
+      })
+      expect(response.status).toBe(200)
+      return response.headers.get("set-cookie")!.split(";", 1)[0]!
+    })()
+    const bobAgain = await (async () => {
+      const response = await restarted.request("/api/login", {
+        method: "POST",
+        headers: { Origin: origin, "Content-Type": "application/json" },
+        body: JSON.stringify({ username: "bob_2", password }),
+      })
+      expect(response.status).toBe(200)
+      return response.headers.get("set-cookie")!.split(";", 1)[0]!
+    })()
+    expect((await (await restarted.request("/api/readings", { headers: { Cookie: aliceAgain } })).json() as { readings: { id: string }[] }).readings.map(({ id }) => id))
+      .toEqual([aliceId])
+    expect((await (await restarted.request("/api/readings", { headers: { Cookie: bobAgain } })).json() as { readings: { id: string }[] }).readings.map(({ id }) => id))
+      .toEqual([bobId])
+  })
+
+  it("keeps a queued upload and its status private to the user who submitted it", async () => {
+    let beginRecognition!: () => void
+    let releaseRecognition!: () => void
+    const started = new Promise<void>((resolve) => { beginRecognition = resolve })
+    const processing = new Promise<void>((resolve) => { releaseRecognition = resolve })
+    const { app, config, signIn } = await setup({
+      recognize: async () => {
+        beginRecognition()
+        await processing
+        return { sys: 128, dia: 76, pul: 61 }
+      },
+    })
+    const aliceCookie = await signIn("alice")
+    const form = new FormData()
+    form.set("photo", new File([imageBytes], "reading.jpg", { type: "image/jpeg" }))
+    const response = await app.request("/api/uploads", {
+      method: "POST",
+      headers: { Origin: origin, Cookie: aliceCookie },
+      body: form,
+    })
+    expect(response.status).toBe(202)
+    const { id: aliceId } = await response.json() as { id: string }
+    await started
+
+    await app.request("/api/logout", { method: "POST", headers: { Origin: origin, Cookie: aliceCookie } })
+    const bobCookie = await signIn("bob")
+    expect(await (await app.request("/api/uploads", { headers: { Cookie: bobCookie } })).json()).toEqual({ uploads: [] })
+    expect((await app.request(`/api/uploads/${aliceId}`, { headers: { Cookie: bobCookie } })).status).toBe(404)
+
+    const bobForm = new FormData()
+    bobForm.set("photo", new File([imageBytes], "reading.jpg", { type: "image/jpeg" }))
+    const bobResponse = await app.request("/api/uploads", {
+      method: "POST",
+      headers: { Origin: origin, Cookie: bobCookie },
+      body: bobForm,
+    })
+    expect(bobResponse.status).toBe(202)
+    const { id: bobId } = await bobResponse.json() as { id: string }
+    releaseRecognition()
+
+    const deadline = Date.now() + 2_000
+    while (Date.now() < deadline) {
+      const aliceJob = await app.request(`/api/uploads/${aliceId}`, { headers: { Cookie: aliceCookie } })
+      const bobJob = await app.request(`/api/uploads/${bobId}`, { headers: { Cookie: bobCookie } })
+      if ((await aliceJob.json() as { status: string }).status === "saved" &&
+        (await bobJob.json() as { status: string }).status === "saved") break
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+
+    expect(await readFile(join(config.dataDir, "alice.csv"), "utf8")).toContain(aliceId)
+    expect(await readFile(join(config.dataDir, "bob.csv"), "utf8")).toContain(bobId)
+    expect(await (await app.request("/api/uploads", { headers: { Cookie: bobCookie } })).json())
+      .toMatchObject({ uploads: [{ id: bobId, status: "saved" }] })
+  })
+
+  it("rejects path-like usernames and old or malformed session identities", async () => {
+    const { app, config } = await setup()
+    for (const username of ["", "../escape", "a/b", ".", "x".repeat(252)]) {
+      const response = await app.request("/api/login", {
+        method: "POST",
+        headers: { Origin: origin, "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      })
+      expect(response.status).toBe(400)
+    }
+    expect(await readdir(config.dataDir)).toEqual([])
+
+    const expiredAt = Math.floor(Date.now() / 1000) + 3600
+    for (const claims of [
+      { sub: "bp-owner", exp: expiredAt },
+      { sub: "bp-user", username: "../escape", exp: expiredAt },
+    ]) {
+      const token = await sign(claims, config.sessionSecret)
+      const response = await app.request("/api/session", { headers: { Cookie: `bp_session=${token}` } })
+      expect(await response.json()).toEqual({ authenticated: false, username: null })
+    }
+    expect(await readdir(config.dataDir)).toEqual([])
+  })
+
   it("expires sessions after one year and resets expiry on a later sign-in", async () => {
     vi.useFakeTimers()
     try {
@@ -144,7 +294,7 @@ describe("BP Tracker API", () => {
         return app.request("/api/login", {
           method: "POST",
           headers: { Origin: origin, "Content-Type": "application/json" },
-          body: JSON.stringify({ password }),
+          body: JSON.stringify({ username: "florian", password }),
         })
       }
 
@@ -153,6 +303,7 @@ describe("BP Tracker API", () => {
         const cookie = serialized.split(";", 1)[0]!
         const token = cookie.slice("bp_session=".length)
         const claims = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8")) as {
+          username: string
           iat: number
           exp: number
         }
@@ -163,6 +314,7 @@ describe("BP Tracker API", () => {
       expect(firstLogin.status).toBe(200)
       const firstSession = sessionFrom(firstLogin)
       const yearInSeconds = 365 * 24 * 60 * 60
+      expect(firstSession.claims.username).toBe("florian")
       expect(firstSession.claims.iat).toBe(Math.floor(firstSignIn.getTime() / 1000))
       expect(firstSession.claims.exp - firstSession.claims.iat).toBe(yearInSeconds)
       expect(firstSession.maxAge).toBe(yearInSeconds)
@@ -209,7 +361,7 @@ describe("BP Tracker API", () => {
       const firstLogin = await app.request("/api/login", {
         method: "POST",
         headers: { Origin: origin, "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ username: "florian", password }),
       })
       const getSession = (cookie?: string) => app.request("/api/session", {
         headers: cookie ? { Cookie: cookie } : {},
@@ -219,6 +371,7 @@ describe("BP Tracker API", () => {
         const cookie = serialized.split(";", 1)[0]!
         const token = cookie.slice("bp_session=".length)
         const claims = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8")) as {
+          username: string
           iat: number
           exp: number
         }
@@ -230,7 +383,7 @@ describe("BP Tracker API", () => {
       expect(firstLogin.status).toBe(200)
       const firstSession = sessionFrom(firstLogin)
       const anonymous = await getSession()
-      expect(await anonymous.json()).toEqual({ authenticated: false })
+      expect(await anonymous.json()).toEqual({ authenticated: false, username: null })
       expect(anonymous.headers.get("set-cookie")).toBeNull()
 
       const token = firstSession.cookie.slice("bp_session=".length)
@@ -238,14 +391,14 @@ describe("BP Tracker API", () => {
       const firstCharacter = token[signatureStart] === "a" ? "b" : "a"
       const tamperedCookie = `bp_session=${token.slice(0, signatureStart)}${firstCharacter}${token.slice(signatureStart + 1)}`
       const tampered = await getSession(tamperedCookie)
-      expect(await tampered.json()).toEqual({ authenticated: false })
+      expect(await tampered.json()).toEqual({ authenticated: false, username: null })
       expect(tampered.headers.get("set-cookie")).toBeNull()
 
       const yearInMilliseconds = 365 * 24 * 60 * 60 * 1000
       const renewalTime = new Date(signInTime.getTime() + 180 * 24 * 60 * 60 * 1000)
       vi.setSystemTime(renewalTime)
       const renewal = await getSession(firstSession.cookie)
-      expect(await renewal.json()).toEqual({ authenticated: true })
+      expect(await renewal.json()).toEqual({ authenticated: true, username: "florian" })
       const renewedSession = sessionFrom(renewal)
       expect(renewedSession.claims.iat).toBe(Math.floor(renewalTime.getTime() / 1000))
       expect(renewedSession.claims.exp - renewedSession.claims.iat).toBe(yearInMilliseconds / 1000)
@@ -257,7 +410,7 @@ describe("BP Tracker API", () => {
       const originalExpiry = new Date(firstSession.claims.exp * 1000)
       vi.setSystemTime(originalExpiry)
       const expired = await getSession(firstSession.cookie)
-      expect(await expired.json()).toEqual({ authenticated: false })
+      expect(await expired.json()).toEqual({ authenticated: false, username: null })
       expect(expired.headers.get("set-cookie")).toBeNull()
       expect(await authenticated(firstSession.cookie)).toBe(false)
       expect(await authenticated(renewedSession.cookie)).toBe(true)
@@ -267,7 +420,7 @@ describe("BP Tracker API", () => {
       expect(await authenticated(renewedSession.cookie)).toBe(true)
       vi.setSystemTime(renewedExpiry)
       const expiredRenewal = await getSession(renewedSession.cookie)
-      expect(await expiredRenewal.json()).toEqual({ authenticated: false })
+      expect(await expiredRenewal.json()).toEqual({ authenticated: false, username: null })
       expect(expiredRenewal.headers.get("set-cookie")).toBeNull()
       expect(await authenticated(renewedSession.cookie)).toBe(false)
     } finally {
@@ -358,7 +511,7 @@ describe("BP Tracker API", () => {
     expect(saved.readings).toEqual([upload?.reading])
     const csv = await app.request("/api/readings.csv", { headers: { Cookie: cookie } })
     expect(await csv.text()).toContain(`${created.id},2025-04-15T09:30:00.000Z,128,76,61,left`)
-    expect(await readFile(config.csvPath, "utf8")).toContain("captured_at,sys,dia,pul,arm")
+    expect(await readFile(join(config.dataDir, "florian.csv"), "utf8")).toContain("captured_at,sys,dia,pul,arm")
   })
 
   it("uses server upload time and Unknown when a photo has no metadata or arm selection", async () => {
@@ -389,12 +542,49 @@ describe("BP Tracker API", () => {
     expect(status?.reading).toMatchObject({ capturedAt: uploadTime, arm: "unknown" })
   })
 
+  it.each([
+    {
+      scenario: "a labeled display with an unreadable diastolic number",
+      photo: () => makeMonitor({ sys: 116, dia: "E1", pul: 61 }),
+      message: "Photo uploaded. BP Journal found the DIA label but couldn't read the diastolic number. Try a closer photo with the full display visible. No reading was saved.",
+    },
+    {
+      scenario: "a JPEG without a monitor display",
+      photo: () => sharp({ create: { width: 200, height: 200, channels: 3, background: "white" } }).jpeg().toBuffer(),
+      message: "Photo uploaded. BP Journal couldn't locate the SYS, DIA, and PUL labels on the monitor display. Try a closer photo with the full display visible. No reading was saved.",
+    },
+    {
+      scenario: "a JPEG the server cannot decode",
+      photo: async () => imageBytes,
+      message: "Photo uploaded. BP Journal couldn't open the JPEG to read it. Try a new copy of the photo. No reading was saved.",
+    },
+  ])("explains why no reading was saved from $scenario", async ({ photo, message }) => {
+    const { app, signIn } = await setup()
+    const cookie = await signIn()
+    const form = new FormData()
+    form.set("photo", new File([new Uint8Array(await photo())], "reading.jpg", { type: "image/jpeg" }))
+
+    const response = await app.request("/api/uploads", {
+      method: "POST",
+      headers: { Origin: origin, Cookie: cookie },
+      body: form,
+    })
+    expect(response.status).toBe(202)
+    const { id } = await response.json() as { id: string }
+
+    await expect.poll(async () => {
+      return (await app.request(`/api/uploads/${id}`, { headers: { Cookie: cookie } })).json()
+    }, { timeout: 4_000 }).toMatchObject({ id, status: "error", error: message })
+    expect(await (await app.request("/api/readings", { headers: { Cookie: cookie } })).json())
+      .toEqual({ readings: [] })
+  })
+
   it("reports a storage failure separately and preserves malformed CSV bytes", async () => {
     const { app, config, signIn } = await setup({
       recognize: async () => ({ sys: 116, dia: 67, pul: 61 }),
     })
     const original = "wrong,header\nkept,data\n"
-    await writeFile(config.csvPath, original)
+    await writeFile(join(config.dataDir, "florian.csv"), original)
     const cookie = await signIn()
     const form = new FormData()
     form.set("photo", new File([imageBytes], "reading.jpg", { type: "image/jpeg" }))
@@ -418,9 +608,9 @@ describe("BP Tracker API", () => {
       id,
       status: "error",
       uploadedAt: expect.any(String),
-      error: "Reading could not be saved. Check server storage and try again.",
+      error: "Photo uploaded and the numbers were read, but the server couldn't save the reading to the journal. Check server storage and try again.",
     })
-    expect(await readFile(config.csvPath, "utf8")).toBe(original)
+    expect(await readFile(join(config.dataDir, "florian.csv"), "utf8")).toBe(original)
   })
 
   it("rejects non-JPEG uploads and bad capture dates", async () => {

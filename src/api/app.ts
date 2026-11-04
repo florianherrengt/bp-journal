@@ -1,4 +1,5 @@
 import { randomUUID, timingSafeEqual, createHash } from "node:crypto"
+import { join } from "node:path"
 
 import { getConnInfo } from "@hono/node-server/conninfo"
 import { Hono, type Context, type Next } from "hono"
@@ -9,7 +10,7 @@ import moment from "moment"
 
 import type { Arm, Reading, UploadJob } from "../shared.ts"
 import type { AppConfig } from "./config.ts"
-import { recognizeReading } from "./ocr.ts"
+import { PhotoRecognitionError, recognizeReading } from "./ocr.ts"
 import { createCsvStore } from "./store.ts"
 
 const COOKIE_NAME = "bp_session"
@@ -31,7 +32,13 @@ export type AppOptions = {
   now?: () => Date
 }
 
-type QueuedUpload = { job: UploadJob; image: Buffer; capturedAt: string; arm: Arm }
+type AppEnv = { Variables: { username: string } }
+type UserJob = { username: string; job: UploadJob }
+type QueuedUpload = UserJob & { image: Buffer; capturedAt: string; arm: Arm }
+
+function isUsername(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z0-9_-]{1,251}$/.test(value)
+}
 
 function isArm(value: unknown): value is Arm {
   return value === "left" || value === "right" || value === "unknown"
@@ -49,46 +56,58 @@ function passwordMatches(candidate: unknown, password: string): boolean {
   return timingSafeEqual(expected, actual)
 }
 
-function csvResponse(csv: string): Response {
+function csvResponse(csv: string, username: string): Response {
   return new Response(csv, {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": 'attachment; filename="blood-pressure-readings.csv"',
+      "Content-Disposition": `attachment; filename="${username}.csv"`,
       "Cache-Control": "no-store",
     },
   })
 }
 
 export function createApp(config: AppConfig, options: AppOptions = {}) {
-  const app = new Hono()
-  const store = createCsvStore(config.csvPath)
+  const app = new Hono<AppEnv>()
+  const stores = new Map<string, ReturnType<typeof createCsvStore>>()
   const recognize = options.recognize ?? recognizeReading
   const now = options.now ?? (() => new Date())
-  const jobs = new Map<string, UploadJob>()
+  const jobs = new Map<string, UserJob>()
   const uploadQueue: QueuedUpload[] = []
   const failedLogins = new Map<string, { attempts: number; expiresAt: number }>()
   let processingQueue = false
+
+  function userStore(username: string) {
+    let store = stores.get(username)
+    if (!store) {
+      store = createCsvStore(join(config.dataDir, `${username}.csv`))
+      stores.set(username, store)
+    }
+    return store
+  }
 
   app.use("/api/*", async (c, next) => {
     await next()
     c.header("Cache-Control", "no-store")
   })
 
-  async function authenticated(c: Context) {
+  async function authenticatedUser(c: Context<AppEnv>): Promise<string | null> {
     const token = getCookie(c, COOKIE_NAME)
-    if (!token) return false
+    if (!token) return null
     try {
       const session = await verify(token, config.sessionSecret, "HS256")
-      return session.sub === "bp-owner" && typeof session.exp === "number"
+      return session.sub === "bp-user" && isUsername(session.username) && typeof session.exp === "number"
+        ? session.username
+        : null
     } catch {
-      return false
+      return null
     }
   }
 
-  async function issueSession(c: Context, time: number) {
+  async function issueSession(c: Context<AppEnv>, username: string, time: number) {
     const issuedAt = Math.floor(time / 1000)
     const token = await sign({
-      sub: "bp-owner",
+      sub: "bp-user",
+      username,
       iat: issuedAt,
       exp: issuedAt + SESSION_SECONDS,
     }, config.sessionSecret)
@@ -101,8 +120,10 @@ export function createApp(config: AppConfig, options: AppOptions = {}) {
     })
   }
 
-  const requireLogin = async (c: Context, next: Next) => {
-    if (!(await authenticated(c))) return c.json({ error: "Sign in to continue." }, 401)
+  const requireLogin = async (c: Context<AppEnv>, next: Next) => {
+    const username = await authenticatedUser(c)
+    if (!username) return c.json({ error: "Sign in to continue." }, 401)
+    c.set("username", username)
     await next()
   }
 
@@ -133,16 +154,19 @@ export function createApp(config: AppConfig, options: AppOptions = {}) {
         } catch (error) {
           console.error(`Upload ${upload.job.id} could not be read:`, error)
           upload.job.status = "error"
-          upload.job.error = "Couldn't read this photo. Try a clearer, closer image."
+          const reason = error instanceof PhotoRecognitionError
+            ? error.message
+            : "BP Journal hit an internal error while reading the photo. Try uploading it again."
+          upload.job.error = `Photo uploaded. ${reason} No reading was saved.`
           continue
         }
 
         try {
-          await store.append(reading)
+          await userStore(upload.username).append(reading)
         } catch (error) {
           console.error(`Reading from upload ${upload.job.id} could not be saved:`, error)
           upload.job.status = "error"
-          upload.job.error = "Reading could not be saved. Check server storage and try again."
+          upload.job.error = "Photo uploaded and the numbers were read, but the server couldn't save the reading to the journal. Check server storage and try again."
           continue
         }
 
@@ -157,17 +181,17 @@ export function createApp(config: AppConfig, options: AppOptions = {}) {
     processingQueue = false
   }
 
-  function addJob(job: UploadJob): void {
-    jobs.set(job.id, job)
+  function addJob(username: string, job: UploadJob): void {
+    jobs.set(job.id, { username, job })
     if (jobs.size > MAX_RETAINED_JOBS) {
       for (const [id, retained] of jobs) {
-        if (retained.status !== "processing") jobs.delete(id)
+        if (retained.job.status !== "processing") jobs.delete(id)
         if (jobs.size <= MAX_RETAINED_JOBS) break
       }
     }
   }
 
-  async function checkOrigin(c: Context, next: Next) {
+  async function checkOrigin(c: Context<AppEnv>, next: Next) {
     if (!isSameOrigin(c.req.raw, config.appOrigin)) {
       return c.json({ error: "Request origin is not allowed." }, 403)
     }
@@ -189,7 +213,7 @@ export function createApp(config: AppConfig, options: AppOptions = {}) {
     try {
       body = await c.req.json()
     } catch {
-      return c.json({ error: "Enter the installation password." }, 400)
+      return c.json({ error: "Enter your username and the installation password." }, 400)
     }
 
     let remote = "unknown"
@@ -221,15 +245,22 @@ export function createApp(config: AppConfig, options: AppOptions = {}) {
       return c.json({ error: "The password is incorrect." }, 401)
     }
 
+    const username = body !== null && typeof body === "object" && "username" in body && typeof body.username === "string"
+      ? body.username.toLowerCase()
+      : undefined
+    if (!isUsername(username)) {
+      return c.json({ error: "Use a username with letters, numbers, hyphens or underscores (up to 251 characters)." }, 400)
+    }
+
     failedLogins.delete(remote)
-    await issueSession(c, time)
-    return c.json({ ok: true })
+    await issueSession(c, username, time)
+    return c.json({ ok: true, username })
   })
 
   app.get("/api/session", async (c) => {
-    const isAuthenticated = await authenticated(c)
-    if (isAuthenticated) await issueSession(c, now().getTime())
-    return c.json({ authenticated: isAuthenticated })
+    const username = await authenticatedUser(c)
+    if (username) await issueSession(c, username, now().getTime())
+    return c.json({ authenticated: username !== null, username })
   })
 
   app.post("/api/logout", checkOrigin, (c) => {
@@ -254,7 +285,7 @@ export function createApp(config: AppConfig, options: AppOptions = {}) {
 
   app.get("/api/readings", async (c) => {
     try {
-      return c.json({ readings: await store.read() })
+      return c.json({ readings: await userStore(c.get("username")).read() })
     } catch {
       return c.json({ error: "The readings file could not be read." }, 500)
     }
@@ -262,7 +293,8 @@ export function createApp(config: AppConfig, options: AppOptions = {}) {
 
   app.get("/api/readings.csv", async (c) => {
     try {
-      const readings = await store.read()
+      const username = c.get("username")
+      const readings = await userStore(username).read()
       const rows = [
         "id,captured_at,sys,dia,pul,arm",
         ...readings.map((row) => [
@@ -274,20 +306,22 @@ export function createApp(config: AppConfig, options: AppOptions = {}) {
           row.arm,
         ].join(",")),
       ]
-      return csvResponse(`${rows.join("\n")}\n`)
+      return csvResponse(`${rows.join("\n")}\n`, username)
     } catch {
       return c.json({ error: "The readings file could not be read." }, 500)
     }
   })
 
-  app.get("/api/uploads", (c) =>
-    c.json({ uploads: [...jobs.values()].map((job) => ({ ...job })) }),
-  )
+  app.get("/api/uploads", (c) => c.json({
+    uploads: [...jobs.values()]
+      .filter((entry) => entry.username === c.get("username"))
+      .map((entry) => ({ ...entry.job })),
+  }))
 
   app.get("/api/uploads/:id", (c) => {
-    const job = jobs.get(c.req.param("id"))
-    if (!job) return c.json({ error: "Upload not found." }, 404)
-    return c.json({ ...job })
+    const entry = jobs.get(c.req.param("id"))
+    if (!entry || entry.username !== c.get("username")) return c.json({ error: "Upload not found." }, 404)
+    return c.json({ ...entry.job })
   })
 
   app.post("/api/uploads", checkOrigin, async (c) => {
@@ -333,8 +367,9 @@ export function createApp(config: AppConfig, options: AppOptions = {}) {
       status: "processing",
       uploadedAt: now().toISOString(),
     }
-    addJob(job)
-    uploadQueue.push({ job, image, capturedAt, arm })
+    const username = c.get("username")
+    addJob(username, job)
+    uploadQueue.push({ username, job, image, capturedAt, arm })
     queueMicrotask(() => void processUploads())
 
     return c.json({ id, status: "processing" }, 202)

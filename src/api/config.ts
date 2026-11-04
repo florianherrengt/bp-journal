@@ -5,7 +5,7 @@ export type AppConfig = {
   password: string
   sessionSecret: string
   appOrigin: string
-  csvPath: string
+  dataDir: string
   secureCookies: boolean
   maxUploadBytes: number
   host: string
@@ -65,7 +65,7 @@ export function readConfig(
     // Set SESSION_SECRET to keep existing sessions valid after a server restart.
     sessionSecret: providedSessionSecret || randomBytes(32).toString("base64url"),
     appOrigin,
-    csvPath: resolve(env.DATA_FILE || "data/readings.csv"),
+    dataDir: resolve(env.DATA_DIR || "data"),
     secureCookies: appOrigin.startsWith("https://"),
     maxUploadBytes: positiveInteger(env.MAX_UPLOAD_BYTES, 8 * 1024 * 1024, "MAX_UPLOAD_BYTES"),
     host: env.HOST || "0.0.0.0",
