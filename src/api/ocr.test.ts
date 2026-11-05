@@ -21,7 +21,7 @@ async function monitorWithDimLcd(sys: number | string, dia: number | string, pul
   const photo = await makeMonitor({ sys, dia, pul })
   const { data, info } = await sharp(photo).raw().toBuffer({ resolveWithObject: true })
   const dimmed = Buffer.from(data)
-  for (let y = 742; y < 874; y++) for (let x = 470; x < 708; x++) {
+  for (let y = 739; y < 835; y++) for (let x = 544; x < 715; x++) {
     const index = (y * info.width + x) * info.channels
     const luma = (data[index]! * 0.299) + (data[index + 1]! * 0.587) + (data[index + 2]! * 0.114)
     const value = luma > 60 ? 74 : 20
@@ -71,12 +71,22 @@ describe("local blood-pressure photo recognition", () => {
     await expect(recognizeReading(photo)).resolves.toEqual(expected)
   })
 
-  it.each(["888", "456", "789", "101", "116", "967", "990"])(
-    "reads three digit monitor values containing %s",
-    async (value) => {
-      const photo = await makeMonitor({ sys: value, dia: value, pul: value })
-      const expected = Number(value)
-      await expect(recognizeReading(photo)).resolves.toEqual({ sys: expected, dia: expected, pul: expected })
+  it("rejects a tilted reference photo when the pulse is unclear", async () => {
+    const photo = await readFile(new URL("../../tests/fixtures/photos/IMG_4914.jpeg", import.meta.url))
+    const tilted = await sharp(photo).rotate(-3, { background: "#eeeeee" })
+      .resize({ width: 1600, height: 1600, fit: "inside" }).jpeg({ quality: 85 }).toBuffer()
+    await expect(recognizeReading(tilted)).rejects.toThrow("couldn't read the pulse number")
+  })
+
+  it.each([
+    { pressure: 888, pul: 140 }, { pressure: 456, pul: 126 }, { pressure: 789, pul: 137 },
+    { pressure: 101, pul: 158 }, { pressure: 116, pul: 169 }, { pressure: 967, pul: 170 },
+    { pressure: 990, pul: 111 },
+  ])(
+    "reads three-digit pressure $pressure and pulse $pul",
+    async ({ pressure, pul }) => {
+      const photo = await makeMonitor({ sys: pressure, dia: pressure, pul })
+      await expect(recognizeReading(photo)).resolves.toEqual({ sys: pressure, dia: pressure, pul })
     },
   )
 
@@ -91,19 +101,25 @@ describe("local blood-pressure photo recognition", () => {
   })
 
   it.each([0.6, 0.8])("locates labels on a more distant monitor at scale %s", async (scale) => {
-    const photo = await makeMonitor({ sys: 119, dia: 83, pul: 63, scale })
+    const photo = await makeMonitor({ sys: 119, dia: 83, pul: 63, scale, background: "#ddd9ce" })
     await expect(recognizeReading(photo)).resolves.toEqual({ sys: 119, dia: 83, pul: 63 })
   })
 
-  it("reads pulse digits that are smaller than the pressure digits", async () => {
+  it("ignores a digit-like stroke to the left of all pulse positions", async () => {
     const photo = await makeMonitor({ sys: 119, dia: 83, pul: 63 })
-    const pulse = await sharp(photo).extract({ left: 470, top: 742, width: 238, height: 132 })
-      .resize({ width: 155 }).png().toBuffer()
-    const erasedPulse = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600"><rect x="470" y="742" width="238" height="132" fill="#b2b9b7"/></svg>`)
-    const smallerPulse = await sharp(photo)
-      .composite([{ input: erasedPulse }, { input: pulse, left: 553, top: 765 }])
-      .jpeg({ quality: 85 }).toBuffer()
-    await expect(recognizeReading(smallerPulse)).resolves.toEqual({ sys: 119, dia: 83, pul: 63 })
+    const stroke = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600">
+      <rect x="505" y="739" width="12" height="44" fill="#263640"/>
+      <rect x="505" y="792" width="12" height="44" fill="#263640"/>
+    </svg>`)
+    const withStroke = await sharp(photo).composite([{ input: stroke }]).jpeg({ quality: 85 }).toBuffer()
+    await expect(recognizeReading(withStroke)).resolves.toEqual({ sys: 119, dia: 83, pul: 63 })
+  })
+
+  it("rejects a pulse with a damaged hundreds digit", async () => {
+    const photo = await makeMonitor({ sys: 119, dia: 83, pul: 163 })
+    const erasedHalf = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600"><rect x="574" y="735" width="24" height="53" fill="#b2b9b7"/></svg>`)
+    const damagedPulse = await sharp(photo).composite([{ input: erasedHalf }]).jpeg({ quality: 85 }).toBuffer()
+    await expect(recognizeReading(damagedPulse)).rejects.toThrow("couldn't read the pulse number")
   })
 
   it("ignores a thin display edge above the pressure digits", async () => {
@@ -142,13 +158,13 @@ describe("local blood-pressure photo recognition", () => {
     await expect(recognizeReading(photo)).resolves.toEqual({ sys: 128, dia: 76, pul: 61 })
   })
 
-  it("keeps adaptive digit isolation when compression leaves only short background runs", async () => {
+  it("ignores dark patches beside the pulse slots after browser compression", async () => {
     const photo = await makeMonitor({ sys: 116, dia: 67, pul: 61 })
     const background = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600">
-      <rect x="425" y="735" width="61" height="176" fill="#4a4a4a"/>
-      <rect x="491" y="735" width="55" height="176" fill="#4a4a4a"/>
-      <rect x="629" y="735" width="55" height="176" fill="#4a4a4a"/>
-      <rect x="713" y="735" width="31" height="176" fill="#4a4a4a"/>
+      <rect x="388" y="735" width="30" height="176" fill="#4a4a4a"/>
+      <rect x="425" y="735" width="58" height="176" fill="#4a4a4a"/>
+      <rect x="489" y="735" width="50" height="176" fill="#4a4a4a"/>
+      <rect x="719" y="735" width="25" height="176" fill="#4a4a4a"/>
     </svg>`)
     const withDarkBackground = await sharp(photo)
       .composite([{ input: background }])
@@ -175,7 +191,7 @@ describe("local blood-pressure photo recognition", () => {
     const photo = await monitorWithDamagedOnes(half)
     const { data, info } = await sharp(photo).raw().toBuffer({ resolveWithObject: true })
     const dimmed = Buffer.from(data)
-    for (let y = 382; y < 874; y++) for (let x = 470; x < 708; x++) {
+    for (let y = 382; y < 514; y++) for (let x = 470; x < 708; x++) {
       const index = (y * info.width + x) * info.channels
       const luma = data[index]! * 0.299 + data[index + 1]! * 0.587 + data[index + 2]! * 0.114
       const value = luma > 60 ? 74 : 20

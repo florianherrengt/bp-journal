@@ -61,28 +61,27 @@ function segmentPoints(segment: Segment): Array<[number, number]> {
   }
 }
 
-function digitMarkup(value: string, x: number, y: number): string {
+function digitMarkup(value: string, x: number, y: number, pulse: boolean): string {
   const active = activeSegments[value.toUpperCase()]
   if (!active) throw new Error(`Unsupported monitor display character: ${value}`)
+  const transform = `translate(${x} ${y})${pulse ? " scale(0.76 0.72)" : ""}`
   return active.map((segment) => {
     const points = polygon(segmentPoints(segment as Segment))
-    return `<polygon points="${points}" transform="translate(${x} ${y})" fill="#263640" opacity="0.84"/>`
+    return `<polygon points="${points}" transform="${transform}" fill="#263640" opacity="0.84"/>`
   }).join("")
 }
 
-function readingMarkup(value: number | string, x: number, y: number): string {
+function readingMarkup(value: number | string, x: number, y: number, pulse: boolean): string {
   const text = String(value).toUpperCase()
   if (!/^\d{2,3}$/.test(text) && !/^E\d{1,2}$/.test(text)) {
     throw new Error("Monitor readings must contain two or three digits (pulse may also be E1)")
   }
 
   const digits = [...text]
-  const slotCount = 3
-  const totalWidth = slotCount * SEGMENT_WIDTH + (slotCount - 1) * CELL_GAP
-  const right = x + totalWidth
+  const pitch = pulse ? 59.4 : SEGMENT_WIDTH + CELL_GAP
   return digits.map((digit, index) => {
-    const cellX = right - (digits.length - index) * (SEGMENT_WIDTH + CELL_GAP) + CELL_GAP
-    return digitMarkup(digit, cellX, y)
+    const cellX = x + (3 - digits.length + index) * pitch
+    return digitMarkup(digit, cellX, y, pulse)
   }).join("")
 }
 
@@ -105,7 +104,8 @@ export async function makeMonitor(options: MonitorOptions): Promise<Buffer> {
   const digitsX = 470
   const labelX = 755
   const rowMarkup = rows.map(({ name, value, top }) => {
-    return readingMarkup(value, digitsX, top) +
+    const pulse = name === "PUL"
+    return readingMarkup(value, pulse ? 544 : digitsX, pulse ? 739 : top, pulse) +
       `<text x="${labelX}" y="${top + SEGMENT_HEIGHT * 0.63}" font-family="Arial, Helvetica, sans-serif" font-size="${labelSize}" font-weight="500" letter-spacing="1.5" fill="#293640">${name}</text>` +
       `<text x="${labelX + 2}" y="${top + SEGMENT_HEIGHT * 0.63 + 34}" font-family="Arial, Helvetica, sans-serif" font-size="23" fill="#4c5960">${name === "PUL" ? "/min" : "mmHg"}</text>`
   }).join("")

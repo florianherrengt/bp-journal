@@ -544,8 +544,9 @@ describe("BP Tracker API", () => {
 
   it.each([
     {
-      scenario: "a display with a pulse of 743 bpm",
-      photo: () => makeMonitor({ sys: 116, dia: 67, pul: 743 }),
+      scenario: "an OCR result with a pulse of 743 bpm",
+      photo: async () => imageBytes,
+      recognize: async () => ({ sys: 116, dia: 67, pul: 743 }),
       message: "Photo uploaded. BP Journal read a pulse of 743 bpm. The UA-611Plus supports 40–180 bpm. Check the display and try a clearer photo. No reading was saved.",
     },
     {
@@ -563,8 +564,8 @@ describe("BP Tracker API", () => {
       photo: async () => imageBytes,
       message: "Photo uploaded. BP Journal couldn't open the JPEG to read it. Try a new copy of the photo. No reading was saved.",
     },
-  ])("explains why no reading was saved from $scenario", async ({ photo, message }) => {
-    const { app, signIn } = await setup()
+  ])("explains why no reading was saved from $scenario", async ({ photo, message, recognize }) => {
+    const { app, signIn } = await setup(recognize ? { recognize } : undefined)
     const cookie = await signIn()
     const form = new FormData()
     form.set("photo", new File([new Uint8Array(await photo())], "reading.jpg", { type: "image/jpeg" }))

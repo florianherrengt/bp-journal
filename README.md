@@ -46,7 +46,7 @@ If the image includes a timezone offset, it is preserved as an instant. If EXIF 
 
 Photos are held temporarily in server memory and discarded after recognition, including failed recognition. Only successful readings enter the CSV. Processing jobs and errors are kept in memory: closing the browser is safe after acknowledgement, but restarting or stopping the server interrupts unfinished uploads. Recent processing errors are visible when you reopen the page while the same server is running.
 
-The photo reader supports the A&D UA-611Plus. It checks the displayed segments and rejects a photo if it cannot identify every value or if a value is outside the monitor's range. The accepted ranges are 60–279 mmHg for systolic pressure, 40–200 mmHg for diastolic pressure, and 40–180 bpm for pulse. Use a clear, upright photo of the full display. [A&D UA-611Plus manual](https://www.aandd.jp/products/manual/medical/ua611_651plus_WE_mdr_en.pdf)
+The photo reader supports the A&D UA-611Plus. It uses the printed DIA and PUL labels to align the pulse digit positions, then reads the LCD segments in those positions. Use a clear, upright photo of the full display. The app asks for another photo if it cannot read a value confidently or if a value falls outside the monitor's range. The accepted ranges are 60–279 mmHg for systolic pressure, 40–200 mmHg for diastolic pressure, and 40–180 bpm for pulse. [A&D UA-611Plus manual](https://www.aandd.jp/products/manual/medical/ua611_651plus_WE_mdr_en.pdf)
 
 ## Tailscale and public hosting
 

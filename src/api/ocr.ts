@@ -42,11 +42,11 @@ function worker(): Promise<Worker> {
 type Image = { data: Buffer; width: number; height: number }
 type Box = { x0: number; y0: number; x1: number; y1: number }
 type Label = typeof labels[number]
+type PressureLabel = Exclude<Label, "PUL">
 
-const displayBands: Record<Label, readonly [above: number, below: number]> = {
+const displayBands: Record<PressureLabel, readonly [above: number, below: number]> = {
   SYS: [0.2, 0.63],
   DIA: [0.42, 0.55],
-  PUL: [0.5, 0.23],
 }
 
 const segmentSampleRects: Array<[number, number, number, number]> = [
@@ -58,6 +58,14 @@ const segmentSampleRects: Array<[number, number, number, number]> = [
   [0.70, 0.57, 0.94, 0.80], // lower right
   [0.28, 0.82, 0.72, 0.98], // bottom
 ]
+
+function matchDigit(observed: number[]): number {
+  const matches = Object.entries(digitSegments).filter(([, patterns]) =>
+    patterns.some((pattern) => pattern.every((segment, index) => segment === observed[index])),
+  )
+  if (matches.length !== 1) throw new Error("Could not confidently read a display digit")
+  return Number(matches[0]![0])
+}
 
 function darkRatio(image: Image, box: Box, rect: [number, number, number, number], isInk: (x: number, y: number) => boolean): number {
   const x0 = Math.max(0, box.x0 + Math.floor((box.x1 - box.x0) * rect[0]))
@@ -104,13 +112,70 @@ function localDisplayInk(image: Image, crop: Box, labelHeight: number, straighte
   return (x, y) => pixels[index(x, y)] === 1
 }
 
-function readDigits(image: Image, row: Box, label: Box, contrastRetry?: Label): number {
+function readPulse(image: Image, diaLabel: Box, pulseLabel: Box): number {
+  const centerY = (pulseLabel.y0 + pulseLabel.y1) / 2
+  const dx = pulseLabel.x0 - diaLabel.x0
+  const dy = centerY - (diaLabel.y0 + diaLabel.y1) / 2
+  // Require enough pixels across the narrow segments to sample them reliably.
+  if (dy < 32) throw new Error("Could not align the pulse row")
+
+  // The printed labels provide the scale and angle of the UA-611Plus LCD.
+  // Coordinates are in label spacings, relative to the left center of PUL.
+  const point = (u: number, v: number) => ({
+    x: Math.round(pulseLabel.x0 + u * dy + v * dx),
+    y: Math.round(centerY - u * dx + v * dy),
+  })
+  const [hundredsStart, tensStart, unitsStart] = [-1.20, -0.87, -0.54] as const
+  const slotWidth = 0.32
+  const top = -0.41
+  const height = 0.55
+  const left = hundredsStart
+  const right = unitsStart + slotWidth
+  const corners = [point(left, top), point(right, top), point(left, top + height), point(right, top + height)]
+  const crop = {
+    x0: Math.min(...corners.map((corner) => corner.x)),
+    y0: Math.min(...corners.map((corner) => corner.y)),
+    x1: Math.max(...corners.map((corner) => corner.x)) + 1,
+    y1: Math.max(...corners.map((corner) => corner.y)) + 1,
+  }
+  if (crop.x0 < 0 || crop.y0 < 0 || crop.x1 > image.width || crop.y1 > image.height) {
+    throw new Error("The pulse row is outside the photo")
+  }
+  const isInk = localDisplayInk(image, crop, pulseLabel.y1 - pulseLabel.y0, true)
+  const samples = 7
+  const readSlot = (start: number, leading = false) => {
+    const observed = segmentSampleRects.map(([x0, y0, x1, y1]) => {
+      let dark = 0
+      for (let column = 0; column < samples; column++) for (let row = 0; row < samples; row++) {
+        const u = start + slotWidth * (x0 + (x1 - x0) * (column + 0.5) / samples)
+        const v = top + height * (y0 + (y1 - y0) * (row + 0.5) / samples)
+        const { x, y } = point(u, v)
+        if (isInk(x, y)) dark++
+      }
+      const ratio = dark / (samples * samples)
+      if (ratio <= 0.15) return 0
+      if (ratio >= 0.25) return 1
+      throw new Error("Could not confidently read a pulse segment")
+    })
+    if (leading && observed.every((segment) => segment === 0)) return 0
+    const digit = matchDigit(observed)
+    if (leading && digit !== 1) throw new Error("Unexpected pulse hundreds digit")
+    return digit
+  }
+  const hundreds = readSlot(hundredsStart, true)
+  const tens = readSlot(tensStart)
+  const units = readSlot(unitsStart)
+  if (hundreds === 0 && tens === 0) throw new Error("Could not find a complete pulse reading")
+  return hundreds * 100 + tens * 10 + units
+}
+
+function readDigits(image: Image, row: Box, label: Box, contrastRetry?: PressureLabel): number {
   const labelHeight = label.y1 - label.y0
   const rowHeight = row.y1 - row.y0
   const largeLabel = labelHeight / rowHeight > 0.25
   const leftPadding = labelHeight * (largeLabel ? (contrastRetry === "SYS" ? 5.3 : 4.3) : 10)
   const center = (label.y0 + label.y1) / 2
-  // On this display the pressure labels sit above center and pulse digits are smaller.
+  // On this display the pressure labels sit above the center of the digits.
   const relativeBand = contrastRetry && largeLabel ? displayBands[contrastRetry] : undefined
   const roi: Box = {
     x0: Math.max(0, Math.floor(label.x0 - leftPadding)),
@@ -121,7 +186,7 @@ function readDigits(image: Image, row: Box, label: Box, contrastRetry?: Label): 
   if (roi.x1 <= roi.x0 || roi.y1 <= roi.y0) throw new Error("Could not isolate the display digits")
   const minRun = Math.max(3, Math.round(labelHeight * 0.1))
   const maxGap = contrastRetry ? 2 : minRun
-  const minColumnInk = Math.round((roi.y1 - roi.y0) * (contrastRetry ? (contrastRetry === "PUL" ? 0.07 : 0.1) : 0.035))
+  const minColumnInk = Math.round((roi.y1 - roi.y0) * (contrastRetry ? 0.1 : 0.035))
   const scanRuns = (isInk: (x: number, y: number) => boolean): Array<[number, number]> => {
     const found: Array<[number, number]> = []
     let runStart = -1
@@ -220,16 +285,7 @@ function readDigits(image: Image, row: Box, label: Box, contrastRetry?: Label): 
     }
     const activeThresholds = [0.32, 0.16, 0.16, 0.4, 0.16, 0.16, 0.34]
     const observed = segmentSampleRects.map((rect, index) => Number(darkRatio(image, glyph, rect, glyphInk) >= activeThresholds[index]!))
-    const match = Object.entries(digitSegments)
-      .map(([digit, segments]) => ({
-        digit: Number(digit),
-        errors: Math.min(...segments.map((pattern) =>
-          pattern.reduce((sum, active, index) => sum + Number(active !== observed[index]), 0),
-        )),
-      }))
-      .sort((a, b) => a.errors - b.errors)
-    if (match[0]!.errors !== 0 || match[1]!.errors === 0) throw new Error("Could not confidently read a display digit")
-    digits.push(match[0]!.digit)
+    digits.push(matchDigit(observed))
   }
   if (digits.length < 2 || digits.length > 3) throw new Error("Could not find a complete display reading")
   return Number(digits.join(""))
@@ -344,6 +400,7 @@ export async function recognizeReading(input: Buffer): Promise<RecognizedReading
         const row = rowBands[index]!
         const band = { x0: 0, y0: row.y0, x1: image.width, y1: row.y1 }
         try {
+          if (label === "PUL") return readPulse(image, labelBoxes[1]!, labelBoxes[2]!)
           try {
             return readDigits(image, band, labelBoxes[index]!)
           } catch {
