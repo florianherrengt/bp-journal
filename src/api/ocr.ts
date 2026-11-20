@@ -81,7 +81,7 @@ function darkRatio(image: Image, box: Box, rect: [number, number, number, number
   return count ? dark / count : 0
 }
 
-function localDisplayInk(image: Image, crop: Box, labelHeight: number, straighten: boolean): (x: number, y: number) => boolean {
+function localDisplayInk(image: Image, crop: Box, labelHeight: number, straighten: boolean, contrastThreshold?: number): (x: number, y: number) => boolean {
   const radius = Math.round(labelHeight / 2)
   const width = crop.x1 - crop.x0
   const pixels = new Uint8Array(width * (crop.y1 - crop.y0))
@@ -105,7 +105,7 @@ function localDisplayInk(image: Image, crop: Box, labelHeight: number, straighte
       // A segment is darker than its surroundings on both sides of one axis.
       // A change in the LCD background by itself doesn't meet that condition.
       const background = Math.max(Math.min(left, right), Math.min(above, below))
-      const minimumContrast = Math.max(10, Math.min(18, background / 2))
+      const minimumContrast = contrastThreshold ?? Math.max(10, Math.min(18, background / 2))
       pixels[index(x, y)] = Number(background - pixel >= minimumContrast)
     }
   }
@@ -163,13 +163,64 @@ function readPulse(image: Image, diaLabel: Box, pulseLabel: Box): number {
     return digit
   }
   const hundreds = readSlot(hundredsStart, true)
-  const tens = readSlot(tensStart)
-  const units = readSlot(unitsStart)
+  let tens: number
+  let units: number
+  try {
+    tens = readSlot(tensStart)
+    units = readSlot(unitsStart)
+  } catch {
+    // Compare a thin stroke with its surroundings on both sides to remove
+    // changes in background brightness caused by reflection.
+    const faintTop = top - 0.03
+    const rowCenter = centerY + (faintTop + height / 2) * dy
+    const gray = (u: number, v: number): number => {
+      const { x, y } = point(u, v)
+      const sourceX = x - Math.round(0.05 * (y - rowCenter))
+      if (sourceX < 0 || sourceX >= image.width || y < 0 || y >= image.height) {
+        throw new Error("The pulse row is outside the photo")
+      }
+      return image.data[y * image.width + sourceX]!
+    }
+    const readFaintSlot = (start: number): number => {
+      const pointsPerStroke = 19
+      const minimumSupport = Math.ceil(pointsPerStroke * 2 / 3)
+      const digits = [0.085, 0.09].map((spacing) => {
+        const observed = segmentSampleRects.map(([x0, y0, x1, y1], index) => {
+          const horizontal = index === 0 || index === 3 || index === 6
+          const flank = horizontal ? height * spacing : slotWidth * 0.2
+          let contrast = 0
+          let supported = 0
+          let clearSupport = 0
+          for (let sample = 0; sample < pointsPerStroke; sample++) {
+            const along = (sample + 0.5) / pointsPerStroke
+            const u = start + slotWidth * (horizontal ? x0 + (x1 - x0) * along : (x0 + x1) / 2)
+            const v = faintTop + height * (horizontal ? (y0 + y1) / 2 : y0 + (y1 - y0) * along)
+            const before = horizontal ? gray(u, v - flank) : gray(u - flank, v)
+            const after = horizontal ? gray(u, v + flank) : gray(u + flank, v)
+            const difference = (before + after) / 2 - gray(u, v)
+            contrast += difference
+            if (difference > 0) supported++
+            if (difference >= 1.5) clearSupport++
+          }
+          const average = contrast / pointsPerStroke
+          // A small bright reflection can overwhelm the average of a real stroke.
+          if (average <= 1.1 && clearSupport < minimumSupport) return 0
+          if (average >= 1.45 && supported >= minimumSupport) return 1
+          throw new Error("Could not confidently read a faint pulse segment")
+        })
+        return matchDigit(observed)
+      })
+      if (digits[0] !== digits[1]) throw new Error("Could not confidently read a faint pulse digit")
+      return digits[0]!
+    }
+    tens = readFaintSlot(tensStart)
+    units = readFaintSlot(unitsStart)
+  }
   if (hundreds === 0 && tens === 0) throw new Error("Could not find a complete pulse reading")
   return hundreds * 100 + tens * 10 + units
 }
 
-function readDigits(image: Image, row: Box, label: Box, contrastRetry?: PressureLabel): number {
+function readDigits(image: Image, row: Box, label: Box, contrastRetry?: PressureLabel, retry?: { above?: number; contrast?: number }): number {
   const labelHeight = label.y1 - label.y0
   const rowHeight = row.y1 - row.y0
   const largeLabel = labelHeight / rowHeight > 0.25
@@ -179,7 +230,7 @@ function readDigits(image: Image, row: Box, label: Box, contrastRetry?: Pressure
   const relativeBand = contrastRetry && largeLabel ? displayBands[contrastRetry] : undefined
   const roi: Box = {
     x0: Math.max(0, Math.floor(label.x0 - leftPadding)),
-    y0: Math.max(0, Math.floor(relativeBand ? center - rowHeight * relativeBand[0] : row.y0 + labelHeight * 0.3)),
+    y0: Math.max(0, Math.floor(relativeBand ? center - rowHeight * (retry?.above ?? relativeBand[0]) : row.y0 + labelHeight * 0.3)),
     x1: Math.min(image.width, Math.floor(label.x0 - labelHeight * (contrastRetry ? 0.5 : 0.25))),
     y1: Math.min(image.height, Math.ceil(relativeBand ? center + rowHeight * relativeBand[1] : row.y1 + labelHeight * 0.3)),
   }
@@ -217,7 +268,7 @@ function readDigits(image: Image, row: Box, label: Box, contrastRetry?: Pressure
     return found
   }
   const fixedIsInk = contrastRetry
-    ? localDisplayInk(image, roi, labelHeight, true)
+    ? localDisplayInk(image, roi, labelHeight, true, retry?.contrast)
     : (x: number, y: number): boolean => image.data[y * image.width + x]! <= 85
   let fixedRuns = scanRuns(fixedIsInk)
   // A narrow run at the crop boundary can be a clipped leading one.
@@ -368,26 +419,29 @@ export async function recognizeReading(input: Buffer): Promise<RecognizedReading
         const centerX = (from.x0 + from.x1 + ratio * (to.x0 + to.x1 - from.x0 - from.x1)) / 2
         const centerY = (from.y0 + from.y1 + ratio * (to.y0 + to.y1 - from.y0 - from.y1)) / 2
         const halfWidth = (from.x1 - from.x0 + to.x1 - to.x0) * 0.3
-        const halfHeight = (boxHeight(from) + boxHeight(to)) * 0.375
         const left = Math.max(0, Math.floor(centerX - halfWidth))
-        const top = Math.max(0, Math.floor(centerY - halfHeight))
         const width = Math.min(image.width, Math.ceil(centerX + halfWidth)) - left
-        const height = Math.min(image.height, Math.ceil(centerY + halfHeight)) - top
-        if (width <= 0 || height <= 0) throw missingDisplayLabels(labelsFound)
-        const focusedImage = await textSharp.clone()
-          .extract({ left, top, width, height })
-          .resize({ width: width * 3, height: height * 3 })
-          .png()
-          .toBuffer()
-        const focusedResult = await (await worker()).recognize(focusedImage, undefined, { blocks: true })
-        const box = labelWords(focusedResult.data.blocks).get(labels[missing]!)
-        if (!box) throw missingDisplayLabels(labelsFound)
-        labelBoxes[missing] = {
-          x0: left + box.x0 / 3,
-          y0: top + box.y0 / 3,
-          x1: left + box.x1 / 3,
-          y1: top + box.y1 / 3,
+        for (const highContrast of [false, true]) {
+          const halfHeight = (boxHeight(from) + boxHeight(to)) * (highContrast ? 0.5 : 0.375)
+          const top = Math.max(0, Math.floor(centerY - halfHeight))
+          const height = Math.min(image.height, Math.ceil(centerY + halfHeight)) - top
+          if (width <= 0 || height <= 0) continue
+          const focused = textSharp.clone()
+            .extract({ left, top, width, height })
+            .resize({ width: width * 3, height: height * 3 })
+          if (highContrast) focused.threshold(128)
+          const focusedResult = await (await worker()).recognize(await focused.png().toBuffer(), undefined, { blocks: true })
+          const box = labelWords(focusedResult.data.blocks).get(labels[missing]!)
+          if (!box) continue
+          labelBoxes[missing] = {
+            x0: left + box.x0 / 3,
+            y0: top + box.y0 / 3,
+            x1: left + box.x1 / 3,
+            y1: top + box.y1 / 3,
+          }
+          break
         }
+        if (!labelBoxes[missing]) throw missingDisplayLabels(labelsFound)
       }
 
       const labelCenters = labelBoxes.map((box) => (box!.y0 + box!.y1) / 2)
@@ -401,10 +455,17 @@ export async function recognizeReading(input: Buffer): Promise<RecognizedReading
         const band = { x0: 0, y0: row.y0, x1: image.width, y1: row.y1 }
         try {
           if (label === "PUL") return readPulse(image, labelBoxes[1]!, labelBoxes[2]!)
+          const labelBox = labelBoxes[index]!
           try {
-            return readDigits(image, band, labelBoxes[index]!)
+            return readDigits(image, band, labelBox)
           } catch {
-            return readDigits(image, band, labelBoxes[index]!, label)
+            try {
+              return readDigits(image, band, labelBox, label)
+            } catch {
+              // Crop below a slanted SYS border or recover lower-contrast DIA strokes.
+              const retry = label === "SYS" ? { above: 0.15 } : { contrast: 10 }
+              return readDigits(image, band, labelBox, label, retry)
+            }
           }
         } catch (cause) {
           throw new PhotoRecognitionError(

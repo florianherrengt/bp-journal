@@ -32,6 +32,29 @@ async function monitorWithDimLcd(sys: number | string, dia: number | string, pul
   return sharp(dimmed, { raw: info }).jpeg({ quality: 90, chromaSubsampling: "4:4:4" }).toBuffer()
 }
 
+async function dimDiastolic(photo: Buffer): Promise<Buffer> {
+  const { data, info } = await sharp(photo).raw().toBuffer({ resolveWithObject: true })
+  for (let y = 548; y < 714; y++) for (let x = 470; x < 724; x++) {
+    const index = (y * info.width + x) * info.channels
+    const value = data[index + 1]! < 90 ? 118 : 130
+    data.fill(value, index, index + info.channels)
+  }
+  return sharp(data, { raw: info }).jpeg({ quality: 85 }).toBuffer()
+}
+
+async function faintPulse(photo: Buffer): Promise<Buffer> {
+  const { data, info } = await sharp(photo).raw().toBuffer({ resolveWithObject: true })
+  const faint = Buffer.from(data)
+  for (let y = 725; y < 850; y++) for (let x = 544; x < 715; x++) {
+    const index = (y * info.width + x) * info.channels
+    // Keep a small vertical offset between the LCD digits and printed labels.
+    const sourceIndex = ((y + 6) * info.width + x) * info.channels
+    const value = data[sourceIndex + 1]! < 90 ? 120 : 130
+    faint.fill(value, index, index + info.channels)
+  }
+  return sharp(faint, { raw: info }).jpeg({ quality: 85 }).toBuffer()
+}
+
 async function monitorWithReflection(
   reading: { sys: number; dia: number; pul: number | string },
   shadowStart: number,
@@ -129,11 +152,37 @@ describe("local blood-pressure photo recognition", () => {
     await expect(recognizeReading(withEdge)).resolves.toEqual({ sys: 119, dia: 83, pul: 63 })
   })
 
+  it("reads systolic digits below a slanted LCD border", async () => {
+    const photo = await makeMonitor({ sys: 114, dia: 76, pul: 81, labelSize: 64 })
+    const systolic = await sharp(photo).extract({ left: 470, top: 382, width: 238, height: 132 }).toBuffer()
+    const border = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600">
+      <rect x="470" y="382" width="238" height="132" fill="#bdc3c0"/>
+      <path d="M 465 414 L 715 404" stroke="#263640" stroke-width="20"/>
+    </svg>`)
+    const withBorder = await sharp(photo)
+      .composite([{ input: border }, { input: systolic, left: 470, top: 422 }])
+      .jpeg({ quality: 85 }).toBuffer()
+    await expect(recognizeReading(withBorder)).resolves.toEqual({ sys: 114, dia: 76, pul: 81 })
+  })
+
   it.each([
     { shadowStart: 477, reading: { sys: 130, dia: 70, pul: 63 } },
     { shadowStart: 500, reading: { sys: 118, dia: 82, pul: 65 } },
   ])("reads complete digits when a reflection darkens the display after row $shadowStart", async ({ shadowStart, reading }) => {
     await expect(recognizeReading(await monitorWithReflection(reading, shadowStart))).resolves.toEqual(reading)
+  })
+
+  it("reads complete diastolic digits with low contrast in a shadow", async () => {
+    const photo = await makeMonitor({ sys: 128, dia: 68, pul: 81, background: "#101010" })
+    await expect(recognizeReading(await dimDiastolic(photo))).resolves.toEqual({ sys: 128, dia: 68, pul: 81 })
+  })
+
+  it.each(["upper", "lower"] as const)("rejects diastolic ones with the %s half erased in a low contrast shadow", async (half) => {
+    const photo = await makeMonitor({ sys: 128, dia: 111, pul: 81, background: "#101010" })
+    const y = half === "upper" ? 562 : 628
+    const erasedHalf = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600"><rect x="470" y="${y}" width="238" height="66" fill="#bdc3c0"/></svg>`)
+    const damaged = await sharp(photo).composite([{ input: erasedHalf }]).jpeg({ quality: 90 }).toBuffer()
+    await expect(recognizeReading(await dimDiastolic(damaged))).rejects.toThrow("couldn't read the diastolic number")
   })
 
   it("rejects an error display under a reflection without mistaking its strokes for ones", async () => {
@@ -172,6 +221,31 @@ describe("local blood-pressure photo recognition", () => {
       .toBuffer()
     await expect(recognizeReading(await browserCompressed(withDarkBackground)))
       .resolves.toEqual({ sys: 116, dia: 67, pul: 61 })
+  })
+
+  it("reads complete pulse digits with low contrast in a shadow", async () => {
+    const photo = await makeMonitor({ sys: 128, dia: 76, pul: 68, background: "#101010" })
+    await expect(recognizeReading(await faintPulse(photo))).resolves.toEqual({ sys: 128, dia: 76, pul: 68 })
+  })
+
+  it("rejects a faint pulse six with its bottom segment erased", async () => {
+    const photo = await makeMonitor({ sys: 128, dia: 76, pul: 68, background: "#101010" })
+    const erasedBottom = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600"><rect x="603" y="821" width="53" height="15" fill="#b2b9b7"/></svg>`)
+    const damaged = await sharp(photo).composite([{ input: erasedBottom }]).jpeg({ quality: 90 }).toBuffer()
+    await expect(recognizeReading(await faintPulse(damaged))).rejects.toThrow("couldn't read the pulse number")
+  })
+
+  it("rejects a small highlight that obscures part of a faint pulse stroke", async () => {
+    const photo = await makeMonitor({ sys: 128, dia: 76, pul: 68, background: "#101010" })
+    const { data, info } = await sharp(await faintPulse(photo)).raw().toBuffer({ resolveWithObject: true })
+    for (let y = 796; y < 799; y++) for (let x = 609; x < 612; x++) {
+      const index = (y * info.width + x) * info.channels
+      for (let channel = 0; channel < info.channels; channel++) {
+        data[index + channel] = Math.min(255, data[index + channel]! + 80)
+      }
+    }
+    const highlighted = await sharp(data, { raw: info }).jpeg({ quality: 95, chromaSubsampling: "4:4:4" }).toBuffer()
+    await expect(recognizeReading(highlighted)).rejects.toThrow("couldn't read the pulse number")
   })
 
   it("recognizes the UA611 Plus seven segment seven with its upper-left bar", async () => {
@@ -217,7 +291,8 @@ describe("focused OCR label retry", () => {
     { problem: "low-confidence DIA", sys: [94, 630, 690], dia: [6, 900, 960], label: "DIA", y0: 33, y1: 153 },
     { problem: "missing SYS", sys: [0, 630, 690], dia: [94, 900, 960], label: "SYS", y0: 48, y1: 168 },
     { problem: "oversized SYS", sys: [94, 580, 760], dia: [94, 900, 960], label: "SYS", y0: 48, y1: 168 },
-  ])("recovers $problem from a crop positioned by the other two labels", async ({ sys, dia, label, y0, y1 }) => {
+    { problem: "missing SYS until contrast retry", sys: [0, 630, 690], dia: [94, 900, 960], label: "SYS", y0: 81, y1: 201, highContrast: true },
+  ])("recovers $problem from a crop positioned by the other two labels", async ({ sys, dia, label, y0, y1, highContrast }) => {
     const fakeWord = (text: string, confidence: number, x0: number, y0: number, x1: number, y1: number) => ({
       text,
       confidence,
@@ -226,6 +301,7 @@ describe("focused OCR label retry", () => {
     const resultWithWords = (words: ReturnType<typeof fakeWord>[]) => ({
       data: { blocks: [{ paragraphs: [{ lines: [{ words }] }] }] },
     })
+    let firstFocusedHeight: number | undefined
     const mockRecognize = vi.fn(async (input: Buffer) => {
       const { height } = await sharp(input).metadata()
       if (height === 1200) {
@@ -237,6 +313,15 @@ describe("focused OCR label retry", () => {
           fakeWord("DIA", dia[0]!, 1132, dia[1]!, 1252, dia[2]!),
           fakeWord("PUL", 93, 1132, 1170, 1252, 1239),
         ])
+      }
+      if (highContrast && firstFocusedHeight === undefined) {
+        firstFocusedHeight = height
+        return resultWithWords([])
+      }
+      if (highContrast) {
+        expect(height).toBeGreaterThan(firstFocusedHeight!)
+        const pixels = await sharp(input).raw().toBuffer()
+        expect(new Set(pixels)).toEqual(new Set([0, 255]))
       }
       return resultWithWords([fakeWord(label, 95, 26, y0, 266, y1)])
     })
@@ -256,7 +341,7 @@ describe("focused OCR label retry", () => {
     try {
       const photo = await makeMonitor({ sys: 119, dia: 83, pul: 63 })
       await expect(recognizeFocusedReading(photo)).resolves.toEqual({ sys: 119, dia: 83, pul: 63 })
-      expect(mockRecognize).toHaveBeenCalledTimes(3)
+      expect(mockRecognize).toHaveBeenCalledTimes(highContrast ? 4 : 3)
     } finally {
       await closeFocusedOcr()
       vi.doUnmock("tesseract.js")
