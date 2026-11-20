@@ -5,6 +5,7 @@ RUN npm ci
 COPY index.html tsconfig.json vite.config.ts ./
 COPY src ./src
 COPY assets ./assets
+COPY tests/fixtures/monitor.ts ./tests/fixtures/
 RUN npm run build
 
 FROM node:24-bookworm-slim
